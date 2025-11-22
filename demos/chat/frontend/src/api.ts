@@ -1,6 +1,6 @@
 import { Provider, Model, Message, StreamChunk } from './types';
 
-const API_BASE = 'http://localhost:8000';
+const API_BASE = 'http://localhost:8001';
 
 export async function fetchProviders(): Promise<Provider[]> {
   const response = await fetch(`${API_BASE}/providers`);
