@@ -2,17 +2,17 @@ from typing import Any, Tuple
 
 from fastapi import HTTPException, status
 
-from any_llm.gateway.db import APIKey
+from any_llm.gateway.db import APIKey, SessionToken
 
 
 def resolve_target_user(
-    auth_result: Tuple[APIKey | None, bool, str | None],
+    auth_result: Tuple[APIKey | None, bool, str | None, SessionToken | None],
     explicit_user: str | None,
     *,
     missing_master_detail: str = "When using master key, user is required",
 ) -> str:
     """Resolve a target user_id from auth context and optional explicit value."""
-    api_key, is_master, resolved_user_id = auth_result
+    api_key, is_master, resolved_user_id, _ = auth_result
 
     if is_master:
         if not explicit_user:

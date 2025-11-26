@@ -186,16 +186,16 @@ async def verify_jwt_or_api_key_or_master(
     request: Request,
     db: Annotated[Session, Depends(get_db)],
     config: Annotated[GatewayConfig, Depends(get_config)],
-) -> tuple[APIKey | None, bool, str | None]:
+) -> tuple[APIKey | None, bool, str | None, SessionToken | None]:
     """Verify JWT (access token), API key, or master key.
 
     Returns:
-        (api_key_obj_or_none, is_master_key, user_id_or_none)
+        (api_key_obj_or_none, is_master_key, user_id_or_none, session_token_or_none)
     """
     token = _extract_bearer_token(request, config)
 
     if _is_valid_master_key(token, config):
-        return None, True, None
+        return None, True, None, None
 
     # Try access token (JWT)
     try:
@@ -219,7 +219,7 @@ async def verify_jwt_or_api_key_or_master(
         session_token.last_used_at = datetime.now(UTC)
         db.commit()
 
-        return None, False, str(user_id)
+        return None, False, str(user_id), session_token
     except HTTPException:
         raise
     except Exception:
@@ -227,4 +227,4 @@ async def verify_jwt_or_api_key_or_master(
         pass
 
     api_key = _verify_and_update_api_key(db, token)
-    return api_key, False, str(api_key.user_id) if api_key.user_id else None
+    return api_key, False, str(api_key.user_id) if api_key.user_id else None, None

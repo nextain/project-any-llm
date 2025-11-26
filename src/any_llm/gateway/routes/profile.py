@@ -1,5 +1,5 @@
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -7,7 +7,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from any_llm.gateway.auth import verify_jwt_or_api_key_or_master
-from any_llm.gateway.db import APIKey, Budget, CaretUser, UsageLog, User, get_db
+from any_llm.gateway.db import APIKey, Budget, CaretUser, SessionToken, UsageLog, User, get_db
 from any_llm.gateway.routes.utils import resolve_target_user
 
 router = APIRouter(prefix="/v1/profile", tags=["profile"])
@@ -33,6 +33,7 @@ class ProfileInfo(BaseModel):
     name: str | None
     email: str | None
     avatar_url: str | None
+    refresh_token: str | None
     blocked: bool
     spend: float
     metadata: dict
@@ -196,13 +197,14 @@ def _recent_usage(db: Session, user_id: str, limit: int) -> list[UsageLogItem]:
 
 @router.get("")
 async def get_profile(
-    auth_result: Annotated[tuple[APIKey | None, bool, str | None], Depends(verify_jwt_or_api_key_or_master)],
+    auth_result: Annotated[tuple[APIKey | None, bool, str | None, SessionToken | None], Depends(verify_jwt_or_api_key_or_master)],
     db: Annotated[Session, Depends(get_db)],
     user: str | None = Query(None, description="마스터 키 사용 시 조회할 user_id"),
 ) -> ProfileResponse:
     """프로필 + 예산 + 사용량 집계 반환."""
+    api_key, is_master, resolved_user_id, session_token = auth_result
     target_user_id = resolve_target_user(
-        auth_result,
+        (api_key, is_master, resolved_user_id),
         user,
         missing_master_detail="When using master key, 'user' query parameter is required",
     )
@@ -230,6 +232,7 @@ async def get_profile(
         name=caret.name if caret else user_obj.alias,
         email=caret.email if caret else None,
         avatar_url=caret.avatar_url if caret else None,
+        refresh_token=session_token.refresh_token_plain if session_token else None,
         blocked=bool(user_obj.blocked),
         metadata=dict(user_obj.metadata_) if user_obj.metadata_ else {},
         caret_metadata=dict(caret.metadata_) if caret and caret.metadata_ else {},
@@ -244,7 +247,7 @@ async def get_profile(
 
 @router.get("/usage")
 async def get_profile_usage(
-    auth_result: Annotated[tuple[APIKey | None, bool, str | None], Depends(verify_jwt_or_api_key_or_master)],
+    auth_result: Annotated[tuple[APIKey | None, bool, str | None, SessionToken | None], Depends(verify_jwt_or_api_key_or_master)],
     db: Annotated[Session, Depends(get_db)],
     user: str | None = Query(None, description="마스터 키 사용 시 조회할 user_id"),
     start: datetime | None = Query(None, description="집계 시작 시각(ISO). 기본: now-30d"),
@@ -253,7 +256,7 @@ async def get_profile_usage(
 ) -> UsageBucketsResponse:
     """사용량 집계(기간별)."""
     target_user_id = resolve_target_user(
-        auth_result,
+        auth_result[:3],
         user,
         missing_master_detail="When using master key, 'user' query parameter is required",
     )
@@ -347,13 +350,13 @@ def _aggregate_range(db: Session, user_id: str, start: datetime, end: datetime) 
 
 @router.get("/keys")
 async def list_profile_keys(
-    auth_result: Annotated[tuple[APIKey | None, bool, str | None], Depends(verify_jwt_or_api_key_or_master)],
+    auth_result: Annotated[tuple[APIKey | None, bool, str | None, SessionToken | None], Depends(verify_jwt_or_api_key_or_master)],
     db: Annotated[Session, Depends(get_db)],
     user: str | None = Query(None, description="마스터 키 사용 시 조회할 user_id"),
 ) -> list[KeySummary]:
     """사용자의 API 키 메타 조회(평문 키 미노출)."""
     target_user_id = resolve_target_user(
-        auth_result,
+        auth_result[:3],
         user,
         missing_master_detail="When using master key, 'user' query parameter is required",
     )
@@ -382,7 +385,7 @@ async def list_profile_keys(
 
 @router.get("/logs")
 async def list_profile_logs(
-    auth_result: Annotated[tuple[APIKey | None, bool, str | None], Depends(verify_jwt_or_api_key_or_master)],
+    auth_result: Annotated[tuple[APIKey | None, bool, str | None, SessionToken | None], Depends(verify_jwt_or_api_key_or_master)],
     db: Annotated[Session, Depends(get_db)],
     user: str | None = Query(None, description="마스터 키 사용 시 조회할 user_id"),
     limit: int = Query(50, ge=1, le=200),

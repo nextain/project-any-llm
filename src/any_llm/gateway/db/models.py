@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey
+from sqlalchemy import JSON, DateTime, ForeignKey, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -196,8 +196,6 @@ class CaretUser(Base):
     email: Mapped[str | None] = mapped_column()
     name: Mapped[str | None] = mapped_column()
     avatar_url: Mapped[str | None] = mapped_column()
-    refresh_token: Mapped[str | None] = mapped_column()
-    access_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
@@ -219,8 +217,6 @@ class CaretUser(Base):
             "email": self.email,
             "name": self.name,
             "avatar_url": self.avatar_url,
-            "refresh_token": self.refresh_token,
-            "access_token_expires_at": self.access_token_expires_at.isoformat() if self.access_token_expires_at else None,
             "last_login_at": self.last_login_at.isoformat() if self.last_login_at else None,
             "metadata": self.metadata_,
             "created_at": self.created_at.isoformat() if self.created_at else None,
@@ -236,6 +232,7 @@ class SessionToken(Base):
     id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.user_id", ondelete="CASCADE"), index=True)
     refresh_token_hash: Mapped[str] = mapped_column(index=True, unique=True)
+    refresh_token_plain: Mapped[str | None] = mapped_column()
     refresh_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
@@ -250,6 +247,7 @@ class SessionToken(Base):
             "id": self.id,
             "user_id": self.user_id,
             "refresh_token_hash": self.refresh_token_hash,
+            "refresh_token_plain": self.refresh_token_plain,
             "refresh_expires_at": self.refresh_expires_at.isoformat() if self.refresh_expires_at else None,
             "revoked_at": self.revoked_at.isoformat() if self.revoked_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,

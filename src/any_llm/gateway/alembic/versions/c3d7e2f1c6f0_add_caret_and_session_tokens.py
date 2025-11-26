@@ -29,8 +29,6 @@ def upgrade() -> None:
         sa.Column("email", sa.String(), nullable=True),
         sa.Column("name", sa.String(), nullable=True),
         sa.Column("avatar_url", sa.String(), nullable=True),
-        sa.Column("refresh_token", sa.String(), nullable=True),
-        sa.Column("access_token_expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_login_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("metadata", sa.JSON(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),

@@ -14,7 +14,7 @@ from any_llm.gateway.auth.dependencies import get_config
 from any_llm.gateway.auth.vertex_auth import setup_vertex_environment
 from any_llm.gateway.budget import validate_user_budget
 from any_llm.gateway.config import GatewayConfig
-from any_llm.gateway.db import APIKey, ModelPricing, UsageLog, User, get_db
+from any_llm.gateway.db import APIKey, ModelPricing, SessionToken, UsageLog, User, get_db
 from any_llm.gateway.log_config import logger
 from any_llm.gateway.routes.utils import resolve_target_user
 from any_llm.types.completion import ChatCompletion, ChatCompletionChunk, CompletionUsage
@@ -147,7 +147,7 @@ async def _log_usage(
 @router.post("/completions", response_model=None)
 async def chat_completions(
     request: ChatCompletionRequest,
-    auth_result: Annotated[tuple[APIKey | None, bool, str | None], Depends(verify_jwt_or_api_key_or_master)],
+    auth_result: Annotated[tuple[APIKey | None, bool, str | None, SessionToken | None], Depends(verify_jwt_or_api_key_or_master)],
     db: Annotated[Session, Depends(get_db)],
     config: Annotated[GatewayConfig, Depends(get_config)],
 ) -> ChatCompletion | StreamingResponse:
@@ -161,7 +161,7 @@ async def chat_completions(
     - API key + user field: Use specified user (must exist)
     - API key without user field: Use virtual user created with API key
     """
-    api_key, _, _ = auth_result
+    api_key, _, _, _ = auth_result
     user_id = resolve_target_user(
         auth_result,
         request.user,

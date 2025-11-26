@@ -139,14 +139,17 @@ def _issue_tokens(
     now = datetime.now(UTC)
     refresh_exp = now + timedelta(days=config.refresh_token_exp_days)
 
+    merged_metadata = metadata or {}
+
     session = SessionToken(
         id=jti,
         user_id=user_id,
         refresh_token_hash=refresh_hash,
+        refresh_token_plain=refresh_token,
         refresh_expires_at=refresh_exp,
         created_at=now,
         last_used_at=now,
-        metadata_=metadata or {},
+        metadata_=merged_metadata,
     )
     db.add(session)
     return access_token, refresh_token, datetime.fromtimestamp(jwt_exp(access_token), tz=UTC), refresh_exp
@@ -261,6 +264,7 @@ async def refresh_token(
         id=str(uuid.uuid4()),
         user_id=session.user_id,
         refresh_token_hash=new_refresh_hash,
+        refresh_token_plain=new_refresh,
         refresh_expires_at=refresh_exp,
         created_at=now,
         last_used_at=now,
@@ -304,7 +308,7 @@ async def logout(
 
 @router.get("/me")
 async def me(
-    auth_result: Annotated[tuple[bool, str | None], Depends(verify_jwt_or_api_key_or_master)],
+    auth_result: Annotated[tuple[APIKey | None, bool, str | None], Depends(verify_jwt_or_api_key_or_master)],
     db: Annotated[Session, Depends(get_db)],
 ) -> MeResponse:
     """내 정보 조회 (JWT/API 키)."""
@@ -312,7 +316,8 @@ async def me(
     if is_master:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Master key is not allowed")
 
-    if not user_id:
+    resolved_user_id = user_id or (api_key.user_id if api_key else None)
+    if not resolved_user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not resolved")
 
     user = db.query(User).filter(User.user_id == resolved_user_id).first()
