@@ -3,11 +3,12 @@ from typing import Annotated, Literal, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func
+from sqlalchemy import func, Float
 from sqlalchemy.orm import Session
 
 from any_llm.gateway.auth import verify_jwt_or_api_key_or_master
 from any_llm.gateway.db import APIKey, Budget, CaretUser, SessionToken, UsageLog, User, get_db
+from sqlalchemy import text
 from any_llm.gateway.routes.utils import resolve_target_user
 
 router = APIRouter(prefix="/v1/profile", tags=["profile"])
@@ -131,6 +132,52 @@ class LogsResponse(BaseModel):
 
     total: int
     items: list[LogItem]
+
+
+class BalanceResponse(BaseModel):
+    """크레딧 잔액 응답."""
+
+    user_id: str
+    total_credits: float
+
+
+@router.get("/balance", response_model=BalanceResponse)
+async def get_balance(
+    auth_result: Annotated[tuple[APIKey | None, bool, str | None, SessionToken | None], Depends(verify_jwt_or_api_key_or_master)],
+    db: Annotated[Session, Depends(get_db)],
+) -> BalanceResponse:
+    """현재 사용자의 크레딧 잔액을 반환."""
+    api_key, is_master, resolved_user_id, session_token = auth_result
+    target_user_id = resolve_target_user(
+        (api_key, is_master, resolved_user_id),
+        None,
+        missing_master_detail="When using master key, user resolution failed",
+    )
+
+    row = (
+        db.query(func.coalesce(func.sum(func.cast(User.spend, Float)), 0).label("spend"))
+        .filter(User.user_id == target_user_id)
+        .one_or_none()
+    )
+
+    # billing_credit_balances.total_credits를 우선, 없으면 spend 기준 0
+    balance_row = (
+        db.execute(
+            """
+            SELECT total_credits
+            FROM billing_credit_balances
+            WHERE user_id = :uid
+            """,
+            {"uid": target_user_id},
+        ).fetchone()
+    )
+
+    total_credits = float(balance_row[0]) if balance_row and balance_row[0] is not None else 0.0
+
+    return BalanceResponse(
+        user_id=target_user_id,
+        total_credits=total_credits,
+    )
 
 
 def _now_naive() -> datetime:
@@ -383,95 +430,111 @@ async def list_profile_keys(
     ]
 
 
+class ProfileLogResponse(BaseModel):
+    aiInferenceProviderName: str
+    aiModelName: str
+    aiModelTypeName: str
+    completionTokens: int
+    costUsd: float
+    createdAt: str
+    creditsUsed: float
+    generationId: str
+    id: str
+    metadata: dict[str, Any]
+    organizationId: str
+    promptTokens: int
+    totalTokens: int
+    userId: str
+
+
+class PaymentRecord(BaseModel):
+    paidAt: str
+    creatorId: str
+    amountCents: int
+    credits: int
+
+
 @router.get("/logs")
 async def list_profile_logs(
     auth_result: Annotated[tuple[APIKey | None, bool, str | None, SessionToken | None], Depends(verify_jwt_or_api_key_or_master)],
     db: Annotated[Session, Depends(get_db)],
-    user: str | None = Query(None, description="마스터 키 사용 시 조회할 user_id"),
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-    start: datetime | None = Query(None, description="시작 시각(ISO)"),
-    end: datetime | None = Query(None, description="종료 시각(ISO)"),
-    status: str | None = Query(None, description="success 또는 error"),
-    model: str | None = Query(None, description="모델 키 필터"),
-    provider: str | None = Query(None, description="프로바이더 필터"),
-    endpoint: str | None = Query(None, description="엔드포인트 필터"),
-    min_prompt_tokens: int | None = Query(None),
-    max_prompt_tokens: int | None = Query(None),
-    min_completion_tokens: int | None = Query(None),
-    max_completion_tokens: int | None = Query(None),
-    min_total_tokens: int | None = Query(None),
-    max_total_tokens: int | None = Query(None),
-    min_cost: float | None = Query(None),
-    max_cost: float | None = Query(None),
-) -> LogsResponse:
-    """사용자 로그 목록(필터/페이지네이션)."""
+) -> list[ProfileLogResponse]:
+    """현재 날짜 기준 최근 7일 로그(최대 100건, 필터 없음)."""
     target_user_id = resolve_target_user(
         auth_result,
-        user,
+        None,
         missing_master_detail="When using master key, 'user' query parameter is required",
     )
 
-    start_dt = _ensure_naive(start) if start else None
-    end_dt = _ensure_naive(end) if end else None
-    if start_dt and end_dt and start_dt > end_dt:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="start must be before end")
+    end_dt = datetime.now(UTC).replace(tzinfo=None)
+    start_dt = end_dt - timedelta(days=7)
 
-    query = db.query(UsageLog).filter(UsageLog.user_id == target_user_id)
-    if start_dt:
-        query = query.filter(UsageLog.timestamp >= start_dt)
-    if end_dt:
-        query = query.filter(UsageLog.timestamp <= end_dt)
-    if status:
-        query = query.filter(UsageLog.status == status)
-    if model:
-        query = query.filter(UsageLog.model == model)
-    if provider:
-        query = query.filter(UsageLog.provider == provider)
-    if endpoint:
-        query = query.filter(UsageLog.endpoint == endpoint)
-    if min_prompt_tokens is not None:
-        query = query.filter(UsageLog.prompt_tokens >= min_prompt_tokens)
-    if max_prompt_tokens is not None:
-        query = query.filter(UsageLog.prompt_tokens <= max_prompt_tokens)
-    if min_completion_tokens is not None:
-        query = query.filter(UsageLog.completion_tokens >= min_completion_tokens)
-    if max_completion_tokens is not None:
-        query = query.filter(UsageLog.completion_tokens <= max_completion_tokens)
-    if min_total_tokens is not None:
-        query = query.filter(UsageLog.total_tokens >= min_total_tokens)
-    if max_total_tokens is not None:
-        query = query.filter(UsageLog.total_tokens <= max_total_tokens)
-    if min_cost is not None:
-        query = query.filter(UsageLog.cost >= min_cost)
-    if max_cost is not None:
-        query = query.filter(UsageLog.cost <= max_cost)
-
-    total = query.count()
     logs = (
-        query.order_by(UsageLog.timestamp.desc())
-        .offset(offset)
-        .limit(limit)
+        db.query(UsageLog)
+        .filter(UsageLog.user_id == target_user_id, UsageLog.timestamp >= start_dt)
+        .order_by(UsageLog.timestamp.desc())
+        .limit(100)
         .all()
     )
 
-    items = [
-        LogItem(
-            id=log.id,
-            timestamp=log.timestamp.isoformat(),
-            model=log.model,
-            provider=log.provider,
-            endpoint=log.endpoint,
-            prompt_tokens=log.prompt_tokens,
-            completion_tokens=log.completion_tokens,
-            total_tokens=log.total_tokens,
-            cost=log.cost,
-            status=log.status,
-            error_message=log.error_message,
-            api_key_id=log.api_key_id,
-            user_id=log.user_id,
+    return [
+        ProfileLogResponse(
+            aiInferenceProviderName=log.provider or "",
+            aiModelName=log.model or "",
+            aiModelTypeName="",
+            completionTokens=log.completion_tokens or 0,
+            costUsd=log.cost or 0.0,
+            createdAt=log.timestamp.isoformat() if log.timestamp else "",
+            creditsUsed=(log.cost or 0.0) * 10,
+            generationId=log.id or "",
+            id=log.id or "",
+            metadata={},
+            organizationId="",
+            promptTokens=log.prompt_tokens or 0,
+            totalTokens=log.total_tokens or 0,
+            userId=log.user_id or "",
         )
         for log in logs
     ]
 
-    return LogsResponse(total=int(total), items=items)
+
+@router.get("/payments")
+async def list_profile_payments(
+    auth_result: Annotated[tuple[APIKey | None, bool, str | None, SessionToken | None], Depends(verify_jwt_or_api_key_or_master)],
+    db: Annotated[Session, Depends(get_db)],
+) -> list[PaymentRecord]:
+    """현재 사용자 결제 이력(청구 인보이스 기반) 반환."""
+    target_user_id = resolve_target_user(
+        auth_result,
+        None,
+        missing_master_detail="When using master key, 'user' query parameter is required",
+    )
+
+    rows = db.execute(
+        text(
+            """
+            SELECT user_id, total AS amount_cents, credits, created_at
+            FROM billing_invoices
+            WHERE user_id = :uid
+            ORDER BY created_at DESC
+            """
+        ),
+        {"uid": target_user_id},
+    ).fetchall()
+
+    payments: list[PaymentRecord] = []
+    for row in rows:
+        amount = int(row["amount_cents"]) if row["amount_cents"] is not None else 0
+        credits = int(row["credits"]) if row["credits"] is not None else 0
+        created_at = row["created_at"].isoformat() if row["created_at"] else ""
+
+        payments.append(
+            PaymentRecord(
+                paidAt=created_at,
+                creatorId=row["user_id"] or "",
+                amountCents=amount,
+                credits=credits,
+            )
+        )
+
+    return payments

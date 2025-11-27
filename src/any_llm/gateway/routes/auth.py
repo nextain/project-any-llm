@@ -88,8 +88,13 @@ class LoginResponse(BaseModel):
 class MeResponse(BaseModel):
     """내 정보 응답."""
 
-    profile: dict[str, Any]
-    budget: BudgetInfo | None
+    id: str
+    email: str
+    displayName: str
+    photoUrl: str
+    createdAt: str
+    updatedAt: str
+    organizations: list[dict[str, Any]]
 
 
 class AuthorizeResponse(BaseModel):
@@ -281,7 +286,7 @@ async def social_login(
             alias=profile.get("name"),
             budget_id=budget.budget_id,
             blocked=False,
-        metadata_=request.metadata,
+            metadata_=request.metadata,
             budget_started_at=datetime.now(UTC),
             next_budget_reset_at=datetime.now(UTC) + timedelta(days=30),
         )
@@ -435,32 +440,13 @@ async def me(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
     caret_user = db.query(CaretUser).filter(CaretUser.user_id == resolved_user_id).first()
-    budget = db.query(Budget).filter(Budget.budget_id == user.budget_id).first() if user.budget_id else None
-
-    profile_payload: dict[str, Any] = {
-        "user_id": user.user_id,
-        "alias": user.alias,
-        "provider": caret_user.provider if caret_user else None,
-        "email": (caret_user.email if caret_user else None)
-        or (dict(user.metadata_).get("email") if user.metadata_ else None),
-        "name": caret_user.name if caret_user else None,
-        "avatar_url": caret_user.avatar_url if caret_user else None,
-        "blocked": bool(user.blocked),
-        "spend": float(user.spend),
-        "budget_id": user.budget_id,
-        "user_metadata": dict(user.metadata_) if user.metadata_ else {},
-        "provider_metadata": dict(caret_user.metadata_) if caret_user and caret_user.metadata_ else {},
-    }
 
     return MeResponse(
-        profile=profile_payload,
-        budget=(
-            BudgetInfo(
-                budget_id=budget.budget_id,
-                max_budget=budget.max_budget,
-                budget_duration_sec=budget.budget_duration_sec,
-            )
-            if budget
-            else None
-        ),
+        id=caret_user.id,
+        email=caret_user.email,
+        displayName=caret_user.name,
+        photoUrl=caret_user.avatar_url,
+        createdAt=caret_user.created_at.isoformat(),
+        updatedAt=caret_user.updated_at.isoformat(),
+        organizations=[],
     )
