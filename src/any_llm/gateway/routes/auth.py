@@ -423,8 +423,16 @@ async def refresh_token(
     new_refresh_hash = hash_token(new_refresh)
     refresh_exp = now + timedelta(days=config.refresh_token_exp_days)
 
+    # Issue new access token first so we can store the plain value on the session row
+    new_session_id = str(uuid.uuid4())
+    access_token = sign_access_token(
+        user_id=session_row.user_id,
+        config=config,
+        jti=new_session_id,
+    )
+
     new_session = SessionToken(
-        id=str(uuid.uuid4()),
+        id=new_session_id,
         user_id=session_row.user_id,
         refresh_token_hash=new_refresh_hash,
         refresh_token_plain=new_refresh,
@@ -435,12 +443,6 @@ async def refresh_token(
         metadata_=session_row.metadata_ if session_row.metadata_ else {},
     )
     db.add(new_session)
-
-    access_token = sign_access_token(
-        user_id=session_row.user_id,
-        config=config,
-        jti=new_session.id,
-    )
     db.commit()
 
     access_exp = datetime.fromtimestamp(jwt_exp(access_token), tz=UTC)
