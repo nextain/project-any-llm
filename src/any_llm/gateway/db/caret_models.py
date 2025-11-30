@@ -274,8 +274,6 @@ class BillingInvoice(Base):
     transaction = relationship("BillingCreditTransaction", back_populates="invoices")
     plan = relationship("BillingPlan", back_populates="invoices")
     caret_user = relationship("CaretUser", back_populates="billing_invoices")
-
-    topups = relationship("CreditTopup", back_populates="invoice", cascade="all, delete-orphan")
     charges = relationship("CreditCharge", back_populates="invoice", cascade="all, delete-orphan")
 
     def to_dict(self) -> dict[str, Any]:
