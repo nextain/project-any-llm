@@ -226,43 +226,33 @@ def jwt_exp(token: str) -> int:
 
 def _ensure_free_plan_and_balance(db: Session, user_id: str, now: datetime) -> None:
     """Seed free subscription plan/subscription and credit pools for new users."""
-    subscription = (
-        db.query(BillingSubscription)
-        .filter(BillingSubscription.user_id == user_id, BillingSubscription.status == "ACTIVE")
+    plan = (
+        db.query(BillingPlan)
+        .filter(BillingPlan.name == "FREE", BillingPlan.active.is_(True))
         .first()
     )
-    if not subscription:
-        subscription = BillingSubscription(
-            user_id=user_id,
-            plan_id=plan.id,
-            status="ACTIVE",
-            start_at=now,
-            renew_at=now + timedelta(days=int(plan.renew_interval_days)),
-        )
-        db.add(subscription)
+    if not plan:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="FREE plan not configured")
 
     expires_at = now + timedelta(days=int(plan.renew_interval_days))
-    balance = (
-        db.query(CreditBalance)
-        .filter(CreditBalance.user_id == user_id, CreditBalance.pool_type == "SUBSCRIPTION")
-        .order_by(CreditBalance.created_at.desc())
-        .first()
+    subscription = BillingSubscription(
+        user_id=user_id,
+        plan_id=plan.id,
+        status="ACTIVE",
+        start_at=now,
+        renew_at=expires_at,
     )
-    if not balance:
-        balance = CreditBalance(
-            user_id=user_id,
-            pool_type="SUBSCRIPTION",
-            source_id=plan.id,
-            amount=float(plan.monthly_credits),
-            expires_at=expires_at,
-            priority=2,
-        )
-        db.add(balance)
-    else:
-        balance.amount = float(plan.monthly_credits)
-        balance.expires_at = expires_at
-        balance.priority = 2
-        balance.source_id = plan.id
+    db.add(subscription)
+
+    balance = CreditBalance(
+        user_id=user_id,
+        pool_type="SUBSCRIPTION",
+        source_id=plan.id,
+        amount=float(plan.monthly_credits),
+        expires_at=expires_at,
+        priority=2,
+    )
+    db.add(balance)
 
     topup = CreditTopup(
         user_id=user_id,
@@ -275,7 +265,6 @@ def _ensure_free_plan_and_balance(db: Session, user_id: str, now: datetime) -> N
         metadata_={"seeded": True},
     )
     db.add(topup)
-
 
 @router.get("/authorize", response_model=AuthorizeResponse)
 async def authorize(
@@ -357,6 +346,7 @@ async def social_login(
 ) -> LoginResponse:
     """소셜 로그인 및 신규 가입."""
     profile = _normalize_profile(request)
+    logger.info(f"Social login: {profile}")
 
     caret_user = db.query(CaretUser).filter(CaretUser.provider == profile["provider"]).first()
 

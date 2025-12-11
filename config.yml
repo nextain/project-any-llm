@@ -1,7 +1,7 @@
 # Configuration for any-llm-gateway
 
 # Database connection URL
-database_url: "postgresql://caret_team:caret_team93*K@34.47.98.74:38870/caret_team"
+database_url: "postgresql://caret_team:caret_team93*K@localhost:38870/caret_team"
 
 # Server configuration - if you want to use a different port, change it here and in the docker-compose.yml file.
 host: "0.0.0.0"
@@ -36,7 +36,8 @@ providers:
     api_key: YOUR_MISTRAL_API_KEY_HERE
 
   gemini:
-    api_key: AIzaSyAOzNGl2gdQb22OWVzqksuvhYuYnFofPcg
+    api_key: AIzaSyBpHhh62pCBuAM04Vqes-ADzmJAXSO9zAw
+
 
   # Add more providers as needed...
 
