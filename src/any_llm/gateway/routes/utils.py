@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from typing import Any, Tuple
 
 from fastapi import HTTPException, status
-from sqlalchemy import func
+from sqlalchemy import func, update
 from sqlalchemy.orm import Session
 
 from any_llm.gateway.db import (
@@ -19,14 +19,54 @@ from any_llm.gateway.log_config import logger
 CREDITS_PER_USD_DEFAULT = 10.0
 
 
+def _get_cached_prompt_tokens(usage: Any) -> int | None:
+    """Extract cached prompt tokens from a provider usage object.
+
+    Supports:
+    - any-llm extensions: usage.cached_tokens (or legacy usage.cache_tokens)
+    - OpenAI SDK: usage.prompt_tokens_details.cached_tokens
+    """
+    if not usage:
+        return None
+
+    cached_tokens = getattr(usage, "cached_tokens", None)
+    if cached_tokens is not None:
+        try:
+            return int(cached_tokens or 0)
+        except (TypeError, ValueError):
+            return None
+
+    prompt_details = getattr(usage, "prompt_tokens_details", None)
+    if prompt_details:
+        if isinstance(prompt_details, dict):
+            cached_tokens = prompt_details.get("cached_tokens")
+        else:
+            cached_tokens = getattr(prompt_details, "cached_tokens", None)
+        if cached_tokens is not None:
+            try:
+                return int(cached_tokens or 0)
+            except (TypeError, ValueError):
+                return None
+
+    return None
+
+
 def _estimate_cost_usd(
     pricing: ModelPricing,
     prompt_tokens: int,
     completion_tokens: int,
+    cached_tokens: int = 0,
 ) -> float:
     """Convert prompt/completion counts to USD using pricing."""
+    cached_tokens = min(max(cached_tokens, 0), prompt_tokens)
+    cached_price = pricing.cached_price_per_million
+    if cached_price is None:
+        cached_price = pricing.input_price_per_million
+
+    non_cached_prompt_tokens = prompt_tokens - cached_tokens
     return (
-        (prompt_tokens / 1_000_000) * pricing.input_price_per_million
+        (non_cached_prompt_tokens / 1_000_000) * pricing.input_price_per_million
+        + (cached_tokens / 1_000_000) * cached_price
         + (completion_tokens / 1_000_000) * pricing.output_price_per_million
     )
 
@@ -57,11 +97,12 @@ def validate_user_credit(db: Session, user_id: str) -> None:
     """Ensure user has available (non-expired) credits; expire stale pools on the fly."""
     # Expire stale pools in one UPDATE to avoid loading all rows.
     db.execute(
-        CreditBalance.__table__.update()
+        update(CreditBalance)
         .where(CreditBalance.user_id == user_id)
         .where(CreditBalance.expires_at.isnot(None))
         .where(CreditBalance.expires_at <= func.now())
-        .where(CreditBalance.amount != 0),
+        .where(CreditBalance.amount != 0)
+        .values(amount=0),
         execution_options={"synchronize_session": False},
     )
     db.commit()
@@ -183,7 +224,8 @@ def charge_usage_cost(
 
     prompt = getattr(usage, "prompt_tokens", 0) or 0
     completion = getattr(usage, "completion_tokens", 0) or 0
-    cost_usd = _estimate_cost_usd(pricing, prompt, completion)
+    cached = _get_cached_prompt_tokens(usage) or 0
+    cost_usd = _estimate_cost_usd(pricing, prompt, completion, cached_tokens=cached)
 
     if cost_usd <= 0:
         return 0.0

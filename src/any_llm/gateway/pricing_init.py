@@ -40,6 +40,7 @@ def initialize_pricing_from_config(config: GatewayConfig, db: Session) -> None:
 
         input_price = pricing_config.input_price_per_million
         output_price = pricing_config.output_price_per_million
+        cached_price = pricing_config.cached_price_per_million
 
         existing_pricing = db.query(ModelPricing).filter(ModelPricing.model_key == model_key).first()
 
@@ -47,7 +48,8 @@ def initialize_pricing_from_config(config: GatewayConfig, db: Session) -> None:
             logger.warning(
                 f"Pricing for model '{model_key}' already exists in database. "
                 f"Keeping database value (input: ${existing_pricing.input_price_per_million}/M, "
-                f"output: ${existing_pricing.output_price_per_million}/M). "
+                f"output: ${existing_pricing.output_price_per_million}/M, "
+                f"cached: ${existing_pricing.cached_price_per_million}/M). "
                 f"To update, use the pricing API or delete the existing entry."
             )
             continue
@@ -56,9 +58,12 @@ def initialize_pricing_from_config(config: GatewayConfig, db: Session) -> None:
             model_key=model_key,
             input_price_per_million=input_price,
             output_price_per_million=output_price,
+            cached_price_per_million=cached_price,
         )
         db.add(new_pricing)
-        logger.info(f"Added pricing for '{model_key}': input=${input_price}/M, output=${output_price}/M")
+        logger.info(
+            f"Added pricing for '{model_key}': input=${input_price}/M, output=${output_price}/M, cached=${cached_price}/M"
+        )
 
     db.commit()
     logger.info("Pricing initialization complete")

@@ -100,7 +100,7 @@ class KeySummary(BaseModel):
     id: str
     key_name: str | None
     user_id: str | None
-    created_at: str
+    created_at: str | None
     last_used_at: str | None
     expires_at: str | None
     is_active: bool
@@ -544,7 +544,7 @@ async def list_profile_payments(
     payments: list[PaymentRecord] = []
     for row in rows:
         # Support tuple/Row/_mapping depending on SQLAlchemy version/driver
-        row_map = row._mapping if hasattr(row, "_mapping") else row
+        row_map: Any = row._mapping if hasattr(row, "_mapping") else row
         amount_raw = row_map["amount_cents"] if "amount_cents" in row_map else None
         credits_raw = row_map["credits"] if "credits" in row_map else None
         created_raw = row_map["created_at"] if "created_at" in row_map else None

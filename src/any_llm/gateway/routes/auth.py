@@ -294,7 +294,7 @@ async def authorize(
     callback_url: Annotated[str, Query(..., description="로그인 후 돌아올 콜백 URL (예: vscode://caretive.caret/auth)")],
     client_type: Annotated[str, Query(description="클라이언트 유형")] = "extension",
     redirect_uri: Annotated[str | None, Query(description="명시적 리디렉션 URI (없으면 callback_url 사용)")] = None,
-    config: Annotated[GatewayConfig, Depends(get_config)] = None,
+    config: Annotated[GatewayConfig | None, Depends(get_config)] = None,
 ) -> AuthorizeResponse:
     """인가 리디렉트 URL을 생성해 반환."""
     if not callback_url:
@@ -318,7 +318,7 @@ async def exchange_token(
     if not request.code:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="code is required")
 
-    session: SessionToken | None = (
+    session: Any = (
         db.query(SessionToken, CaretUser)
         .join(CaretUser, CaretUser.user_id == SessionToken.user_id, isouter=True)
         .filter(SessionToken.provider_token == request.code)
@@ -326,16 +326,19 @@ async def exchange_token(
         .first()
     )
     now = datetime.now(UTC)
-    if not session or session.SessionToken.refresh_expires_at < now or session.SessionToken.revoked_at:
+    if not session:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid or expired code")
-
-    if not session.SessionToken.refresh_token_plain or not session.SessionToken.access_token_plain:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="session missing tokens")
 
     token_row: SessionToken = session.SessionToken
     caret_row: CaretUser | None = session.CaretUser
+
+    if token_row.refresh_expires_at < now or token_row.revoked_at:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid or expired code")
+
+    if not token_row.refresh_token_plain or not token_row.access_token_plain:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="session missing tokens")
     user_info = {
-        "id": caret_row.id,
+        "id": caret_row.id if caret_row else "",
         "email": caret_row.email if caret_row else "",
         "name": caret_row.name if caret_row else "",
         "subject": caret_row.provider if caret_row else "",
@@ -381,7 +384,7 @@ async def social_login(
     )
 
     is_new_user = caret_user is None
-    user: User
+    user: User | None
     api_key: APIKey
     raw_api_key: str | None = None
 
@@ -515,7 +518,7 @@ async def refresh_token(
 
     access_exp = datetime.fromtimestamp(jwt_exp(access_token), tz=UTC)
     user_info = {
-        "id": caret_row.id,
+        "id": caret_row.id if caret_row else "",
         "email": caret_row.email if caret_row else "",
         "name": caret_row.name if caret_row else "",
         "subject": caret_row.provider if caret_row else "",
@@ -564,7 +567,7 @@ async def logout(
 
 @router.get("/me")
 async def me(
-    auth_result: Annotated[tuple[APIKey | None, bool, str | None], Depends(verify_jwt_or_api_key_or_master)],
+    auth_result: Annotated[tuple[APIKey | None, bool, str | None, SessionToken | None], Depends(verify_jwt_or_api_key_or_master)],
     db: Annotated[Session, Depends(get_db)],
 ) -> MeResponse:
     """내 정보 조회 (JWT/API 키)."""
@@ -583,6 +586,8 @@ async def me(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
     caret_user = db.query(CaretUser).filter(CaretUser.user_id == resolved_user_id).first()
+    if not caret_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="CaretUser profile not found")
 
     return MeResponse(
             success=True,

@@ -173,6 +173,14 @@ class GoogleProvider(AnyLLM):
             completion_tokens=usage_dict.get("completion_tokens", 0),
             total_tokens=usage_dict.get("total_tokens", 0),
         )
+        cached_tokens = usage_dict.get("cached_tokens", 0) or 0
+        try:
+            usage.cached_tokens = cached_tokens  # type: ignore[attr-defined]
+        except Exception:
+            try:
+                usage = usage.model_copy(update={"cached_tokens": cached_tokens})
+            except Exception:
+                pass
 
         return ChatCompletion(
             id=response_dict.get("id", ""),

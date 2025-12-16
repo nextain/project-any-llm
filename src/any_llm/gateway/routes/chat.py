@@ -1,3 +1,4 @@
+import json
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -13,10 +14,11 @@ from any_llm.gateway.auth import verify_jwt_or_api_key_or_master
 from any_llm.gateway.auth.dependencies import get_config
 from any_llm.gateway.auth.vertex_auth import setup_vertex_environment
 from any_llm.gateway.config import GatewayConfig
-from any_llm.gateway.db import APIKey, ModelPricing, SessionToken, UsageLog, User, get_db, CreditBalance
+from any_llm.gateway.db import APIKey, ModelPricing, SessionToken, UsageLog, User, get_db
 from any_llm.gateway.log_config import logger
 # for caret
 from any_llm.gateway.routes.utils import (
+    _get_cached_prompt_tokens,
     charge_usage_cost,
     resolve_target_user,
     validate_user_credit,
@@ -95,11 +97,20 @@ def _get_model_pricing(
 
 
 def _calculate_usage_cost(usage_data: CompletionUsage, pricing: ModelPricing) -> float:
-    prompt_tokens = usage_data.prompt_tokens or 0
-    completion_tokens = usage_data.completion_tokens or 0
-    return (prompt_tokens / 1_000_000) * pricing.input_price_per_million + (
-        completion_tokens / 1_000_000
-    ) * pricing.output_price_per_million
+    total_prompt_tokens = usage_data.prompt_tokens or 0
+    cached_prompt_tokens = _get_cached_prompt_tokens(usage_data) or 0
+    cached_prompt_tokens = min(max(cached_prompt_tokens, 0), total_prompt_tokens)
+    standard_prompt_tokens = total_prompt_tokens - cached_prompt_tokens
+    output_tokens = usage_data.completion_tokens or 0
+    cached_price = pricing.cached_price_per_million
+    if cached_price is None:
+        cached_price = pricing.input_price_per_million
+
+    return (
+        (standard_prompt_tokens / 1_000_000) * pricing.input_price_per_million
+        + (cached_prompt_tokens / 1_000_000) * cached_price
+        + (output_tokens / 1_000_000) * pricing.output_price_per_million
+    )
 
 
 def _maybe_attach_cost_to_usage(
@@ -112,7 +123,7 @@ def _maybe_attach_cost_to_usage(
 
     if getattr(usage, "cost", None) is not None:
         return usage
-
+        
     prompt_tokens = usage.prompt_tokens or 0
     completion_tokens = usage.completion_tokens or 0
     if prompt_tokens == 0 and completion_tokens == 0:
@@ -179,6 +190,7 @@ async def _log_usage(
         usage_log.prompt_tokens = usage_data.prompt_tokens
         usage_log.completion_tokens = usage_data.completion_tokens
         usage_log.total_tokens = usage_data.total_tokens
+        usage_log.cached_tokens = _get_cached_prompt_tokens(usage_data)
 
         resolved_model_key = model_key or _build_model_key(provider, model)
         pricing = model_pricing
@@ -248,12 +260,16 @@ async def chat_completions(
                 prompt_tokens = 0
                 completion_tokens = 0
                 total_tokens = 0
+                cached_tokens = 0
+                cached_tokens_seen = False
 
                 try:
                     stream: AsyncIterator[ChatCompletionChunk] = await acompletion(**completion_kwargs)  # type: ignore[assignment]
                     async for chunk in stream:
                         if chunk.usage:
                             chunk.usage = _maybe_attach_cost_to_usage(chunk.usage, model_pricing)
+
+                        if chunk.usage:
                             # Prompt tokens should be constant, take first non-zero value
                             if chunk.usage.prompt_tokens and not prompt_tokens:
                                 prompt_tokens = chunk.usage.prompt_tokens
@@ -261,17 +277,29 @@ async def chat_completions(
                                 completion_tokens = max(completion_tokens, chunk.usage.completion_tokens)
                             if chunk.usage.total_tokens:
                                 total_tokens = max(total_tokens, chunk.usage.total_tokens)
+                            cached_tokens_value = _get_cached_prompt_tokens(chunk.usage)
+                            if cached_tokens_value is not None:
+                                cached_tokens_seen = True
+                                cached_tokens = max(cached_tokens, cached_tokens_value or 0)
 
                         yield f"data: {chunk.model_dump_json()}\n\n"
                     yield "data: [DONE]\n\n"
 
                     # Log aggregated usage
-                    if prompt_tokens or completion_tokens or total_tokens:
+                    if prompt_tokens or completion_tokens or total_tokens or cached_tokens_seen:
                         usage_data = CompletionUsage(
                             prompt_tokens=prompt_tokens,
                             completion_tokens=completion_tokens,
                             total_tokens=total_tokens,
                         )
+                        if cached_tokens_seen:
+                            try:
+                                usage_data.cached_tokens = cached_tokens  # type: ignore[attr-defined]
+                            except Exception:
+                                try:
+                                    usage_data = usage_data.model_copy(update={"cached_tokens": cached_tokens})
+                                except Exception:
+                                    pass
                         # for caret
                         usage_log_id = await _log_usage(
                             db=db,

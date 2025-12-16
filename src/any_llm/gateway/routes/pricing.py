@@ -16,6 +16,7 @@ class SetPricingRequest(BaseModel):
     model_key: str = Field(description="Model identifier in format 'provider:model'")
     input_price_per_million: float = Field(description="Price per 1M input tokens")
     output_price_per_million: float = Field(description="Price per 1M output tokens")
+    cached_price_per_million: float | None = Field(default=None, description="Price per 1M cached input tokens")
 
 
 class PricingResponse(BaseModel):
@@ -24,6 +25,7 @@ class PricingResponse(BaseModel):
     model_key: str
     input_price_per_million: float
     output_price_per_million: float
+    cached_price_per_million: float | None
     created_at: str
     updated_at: str
 
@@ -39,11 +41,14 @@ async def set_pricing(
     if pricing:
         pricing.input_price_per_million = request.input_price_per_million
         pricing.output_price_per_million = request.output_price_per_million
+        if request.cached_price_per_million is not None:
+            pricing.cached_price_per_million = request.cached_price_per_million
     else:
         pricing = ModelPricing(
             model_key=request.model_key,
             input_price_per_million=request.input_price_per_million,
             output_price_per_million=request.output_price_per_million,
+            cached_price_per_million=request.cached_price_per_million,
         )
         db.add(pricing)
 
@@ -54,6 +59,7 @@ async def set_pricing(
         model_key=pricing.model_key,
         input_price_per_million=pricing.input_price_per_million,
         output_price_per_million=pricing.output_price_per_million,
+        cached_price_per_million=pricing.cached_price_per_million,
         created_at=pricing.created_at.isoformat(),
         updated_at=pricing.updated_at.isoformat(),
     )
@@ -73,6 +79,7 @@ async def list_pricing(
             model_key=pricing.model_key,
             input_price_per_million=pricing.input_price_per_million,
             output_price_per_million=pricing.output_price_per_million,
+            cached_price_per_million=pricing.cached_price_per_million,
             created_at=pricing.created_at.isoformat(),
             updated_at=pricing.updated_at.isoformat(),
         )
@@ -98,6 +105,7 @@ async def get_pricing(
         model_key=pricing.model_key,
         input_price_per_million=pricing.input_price_per_million,
         output_price_per_million=pricing.output_price_per_million,
+        cached_price_per_million=pricing.cached_price_per_million,
         created_at=pricing.created_at.isoformat(),
         updated_at=pricing.updated_at.isoformat(),
     )

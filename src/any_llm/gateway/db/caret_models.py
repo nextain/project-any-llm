@@ -153,6 +153,9 @@ class BillingSubscription(Base):
     renew_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     transaction_id: Mapped[str | None] = mapped_column(ForeignKey("billing_credit_transactions.id"), nullable=True)
+    lemon_subscription_id: Mapped[str | None] = mapped_column(nullable=True, index=True)
+    lemon_customer_id: Mapped[str | None] = mapped_column(nullable=True, index=True)
+    lemon_checkout_id: Mapped[str | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -205,6 +208,7 @@ class BillingCreditTransaction(Base):
     event_payload: Mapped[dict[str, Any] | None] = mapped_column("event_payload", JSON, default=dict)
     failure_reason: Mapped[str | None] = mapped_column(nullable=True)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

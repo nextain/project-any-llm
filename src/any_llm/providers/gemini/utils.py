@@ -130,7 +130,11 @@ def _convert_response_to_response_dict(response: types.GenerateContentResponse) 
             "prompt_tokens": getattr(response.usage_metadata, "prompt_token_count", 0)
             if hasattr(response, "usage_metadata")
             else 0,
-            "completion_tokens": getattr(response.usage_metadata, "candidates_token_count", 0)
+            "completion_tokens": (getattr(response.usage_metadata, "candidates_token_count", 0) or 0)
+            + (getattr(response.usage_metadata, "thoughts_token_count", 0) or 0)
+            if hasattr(response, "usage_metadata")
+            else 0,
+            "cached_tokens": getattr(response.usage_metadata, "cached_content_token_count", 0)
             if hasattr(response, "usage_metadata")
             else 0,
             "total_tokens": getattr(response.usage_metadata, "total_token_count", 0)
@@ -267,9 +271,18 @@ def _create_openai_chunk_from_google_chunk(
     if getattr(response, "usage_metadata", None):
         usage = CompletionUsage(
             prompt_tokens=response.usage_metadata.prompt_token_count or 0,
-            completion_tokens=response.usage_metadata.candidates_token_count or 0,
+            completion_tokens=(response.usage_metadata.candidates_token_count or 0)
+            + (getattr(response.usage_metadata, "thoughts_token_count", 0) or 0),
             total_tokens=response.usage_metadata.total_token_count or 0,
         )
+        cached_tokens = getattr(response.usage_metadata, "cached_content_token_count", 0) or 0
+        try:
+            usage.cached_tokens = cached_tokens  # type: ignore[attr-defined]
+        except Exception:
+            try:
+                usage = usage.model_copy(update={"cached_tokens": cached_tokens})
+            except Exception:
+                pass
 
     # 완전히 빈 청크(내용/usage/finish_reason 없음)는 건너뛴다.
     if not parts and usage is None and finish_reason is None:

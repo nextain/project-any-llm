@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String
+from sqlalchemy import JSON, DateTime, ForeignKey
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
@@ -121,6 +121,7 @@ class ModelPricing(Base):
     model_key: Mapped[str] = mapped_column(primary_key=True)
     input_price_per_million: Mapped[float] = mapped_column()
     output_price_per_million: Mapped[float] = mapped_column()
+    cached_price_per_million: Mapped[float | None] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -134,6 +135,7 @@ class ModelPricing(Base):
             "model_key": self.model_key,
             "input_price_per_million": self.input_price_per_million,
             "output_price_per_million": self.output_price_per_million,
+            "cached_price_per_million": self.cached_price_per_million,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -156,6 +158,7 @@ class UsageLog(Base):
     prompt_tokens: Mapped[int | None] = mapped_column()
     completion_tokens: Mapped[int | None] = mapped_column()
     total_tokens: Mapped[int | None] = mapped_column()
+    cached_tokens: Mapped[int | None] = mapped_column()
     cost: Mapped[float | None] = mapped_column()
 
     status: Mapped[str] = mapped_column()
@@ -176,6 +179,7 @@ class UsageLog(Base):
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.total_tokens,
+            "cached_tokens": self.cached_tokens,
             "cost": self.cost,
             "status": self.status,
             "error_message": self.error_message,

@@ -14,6 +14,7 @@ class PricingConfig(BaseModel):
 
     input_price_per_million: float
     output_price_per_million: float
+    cached_price_per_million: float | None = None
 
 
 class GatewayConfig(BaseSettings):
@@ -41,7 +42,10 @@ class GatewayConfig(BaseSettings):
     )
     pricing: dict[str, PricingConfig] = Field(
         default_factory=dict,
-        description="Pre-configured model USD pricing (model_key -> {input_price_per_million, output_price_per_million})",
+        description=(
+            "Pre-configured model USD pricing (model_key -> "
+            "{input_price_per_million, output_price_per_million, cached_price_per_million})"
+        ),
     )
     jwt_secret: str | None = Field(default=None, description="Signing secret for access/refresh tokens (falls back to master key)")
     access_token_exp_minutes: int = Field(default=30, description="Access token lifetime in minutes")
