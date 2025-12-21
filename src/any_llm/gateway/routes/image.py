@@ -38,11 +38,21 @@ class GenerateImageRequest(BaseModel):
     stream: bool = False
 
 
+class ImageUsage(BaseModel):
+    inputTokens: int = 0
+    outputTokens: int = 0
+    totalTokens: int | None = None
+    totalCost: float | None = None
+    cacheWriteTokens: int = 0
+    cacheReadTokens: int = 0
+
+
 class GenerateImageResponse(BaseModel):
     mimeType: str
     base64: str
     texts: list[str] = Field(default_factory=list)
     thoughts: list[str] = Field(default_factory=list)
+    usage: ImageUsage | None = None
 
 
 def _get_gemini_api_key(config: GatewayConfig) -> str:
@@ -132,10 +142,10 @@ def _coerce_usage_metadata(usage: Any | None) -> Any | None:
     if getattr(usage, "prompt_tokens", None) is not None:
         return usage
 
-    prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
-    completion_tokens = getattr(usage, "candidates_token_count", 0) or 0
-    total_tokens = getattr(usage, "total_token_count", 0) or 0
-    thought_tokens = getattr(usage, "thoughts_token_count", 0) or 0
+    prompt_tokens = _get_usage_numeric(usage, "prompt_token_count", "prompt_tokens") or 0
+    completion_tokens = _get_usage_numeric(usage, "candidates_token_count", "completion_tokens") or 0
+    total_tokens = _get_usage_numeric(usage, "total_token_count", "total_tokens") or 0
+    thought_tokens = _get_usage_numeric(usage, "thoughts_token_count") or 0
 
     if prompt_tokens is None and completion_tokens is None and total_tokens is None:
         return usage
@@ -152,8 +162,22 @@ def _coerce_usage_metadata(usage: Any | None) -> Any | None:
 
 
 def _get_usage_numeric(metadata: Any, *attrs: str) -> int | None:
+    if not metadata:
+        return None
+
+    def _lookup(obj: Any, key: str) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(key)
+        return getattr(obj, key, None)
+
+    def _camelize(key: str) -> str:
+        parts = key.split("_")
+        return parts[0] + "".join(part.capitalize() for part in parts[1:]) if len(parts) > 1 else key
+
     for attr in attrs:
-        value = getattr(metadata, attr, None)
+        value = _lookup(metadata, attr)
+        if value is None and "_" in attr:
+            value = _lookup(metadata, _camelize(attr))
         if isinstance(value, (int, float)):
             return int(value)
     return None
@@ -283,6 +307,18 @@ async def generate_image(
     def _format_sse_event(payload: dict[str, object]) -> str:
         return f"data: {json.dumps(payload)}\n\n"
 
+    def _build_usage_response(usage: Any | None, cost: float | None) -> ImageUsage | None:
+        if not usage:
+            return None
+        return ImageUsage(
+            inputTokens=getattr(usage, "prompt_tokens", 0) or 0,
+            outputTokens=getattr(usage, "completion_tokens", 0) or 0,
+            totalTokens=getattr(usage, "total_tokens", 0) or 0,
+            totalCost=float(cost) if cost is not None else None,
+            cacheWriteTokens=0,
+            cacheReadTokens=0,
+        )
+
     if request.stream:
         try:
             logger.info("Using generate_content_stream")
@@ -301,6 +337,38 @@ async def generate_image(
             usage_accumulator = UsageAccumulator()
             stream_error: str | None = None
             usage_log_id: str | None = None
+            usage_finalized = False
+            usage_payload: ImageUsage | None = None
+
+            def finalize_usage() -> ImageUsage | None:
+                nonlocal usage_finalized, usage_log_id, usage_payload
+                if usage_finalized:
+                    return usage_payload
+                usage_info_stream = usage_accumulator.finalize()
+                usage_log_id = _log_image_usage(
+                    db=db,
+                    api_key_obj=api_key_obj,
+                    model=model_id,
+                    provider=provider_name,
+                    endpoint="/v1/generate/image",
+                    user_id=_user_id,
+                    usage=usage_info_stream,
+                    error=stream_error,
+                )
+                if usage_info_stream:
+                    cost = charge_usage_cost(
+                        db,
+                        user_id=_user_id,
+                        usage=usage_info_stream,
+                        model_key=model_key,
+                        usage_id=usage_log_id,
+                    )
+                    _set_usage_cost(db, usage_log_id, cost)
+                    _add_user_spend(db, _user_id, cost)
+                    usage_payload = _build_usage_response(usage_info_stream, cost)
+                usage_finalized = True
+                return usage_payload
+
             try:
                 chunk_index = 0
                 for chunk in stream_ref:
@@ -390,33 +458,16 @@ async def generate_image(
                             }
                         )
                 logger.info("image stream completed after %d chunk(s)", chunk_index)
+                usage_payload = finalize_usage()
+                if usage_payload:
+                    yield _format_sse_event({"type": "usage", **usage_payload.model_dump()})
                 yield _format_sse_event({"type": "done"})
             except Exception as e:
                 stream_error = str(e)
                 logger.error("image stream failed: %s", stream_error)
                 yield _format_sse_event({"type": "error", "message": stream_error})
             finally:
-                usage_info_stream = usage_accumulator.finalize()
-                usage_log_id = _log_image_usage(
-                    db=db,
-                    api_key_obj=api_key_obj,
-                    model=model_id,
-                    provider=provider_name,
-                    endpoint="/v1/generate/image",
-                    user_id=_user_id,
-                    usage=usage_info_stream,
-                    error=stream_error,
-                )
-                if usage_info_stream:
-                    cost = charge_usage_cost(
-                        db,
-                        user_id=_user_id,
-                        usage=usage_info_stream,
-                        model_key=model_key,
-                        usage_id=usage_log_id,
-                    )
-                    _set_usage_cost(db, usage_log_id, cost)
-                    _add_user_spend(db, _user_id, cost)
+                finalize_usage()
                 try:
                     client_ref.close()
                 except Exception:
@@ -490,7 +541,7 @@ async def generate_image(
         )
 
     base64_str = base64.b64encode(image_bytes).decode("utf-8")
-    usage_info = getattr(resp, "usage", None)
+    usage_info = getattr(resp, "usage_metadata", None) or getattr(resp, "usage", None)
     usage_for_charge = _coerce_usage_metadata(usage_info) or usage_info
     usage_log_id = _log_image_usage(
         db=db,
@@ -501,6 +552,7 @@ async def generate_image(
         user_id=_user_id,
         usage=usage_for_charge,
     )
+    usage_payload: ImageUsage | None = None
     if usage_for_charge:
         cost = charge_usage_cost(
             db,
@@ -511,4 +563,11 @@ async def generate_image(
         )
         _set_usage_cost(db, usage_log_id, cost)
         _add_user_spend(db, _user_id, cost)
-    return GenerateImageResponse(mimeType=mime_type, base64=base64_str, texts=texts, thoughts=thoughts)
+        usage_payload = _build_usage_response(usage_for_charge, cost)
+    return GenerateImageResponse(
+        mimeType=mime_type,
+        base64=base64_str,
+        texts=texts,
+        thoughts=thoughts,
+        usage=usage_payload,
+    )
