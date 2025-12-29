@@ -1,3 +1,4 @@
+import base64
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -41,6 +42,77 @@ class ChatCompletionRequest(BaseModel):
     tools: list[dict[str, Any]] | None = None
     tool_choice: str | dict[str, Any] | None = None
     response_format: dict[str, Any] | None = None
+
+
+def _normalize_data_url(value: str) -> str:
+    if not value.startswith("data:"):
+        raise ValueError("image_url.url must be a data URL or a remote URL")
+
+    header, base64_payload = value.split(",", 1) if "," in value else ("", "")
+    if not header or ";base64" not in header:
+        raise ValueError("image_url.url must be a base64-encoded data URL")
+
+    mime_type = header[5:].split(";", 1)[0]
+    if not mime_type.startswith("image/"):
+        raise ValueError("image_url.url must be an image data URL")
+
+    sanitized_payload = "".join(base64_payload.split())
+    if not sanitized_payload:
+        raise ValueError("image_url.url must contain base64 data")
+
+    try:
+        base64.b64decode(sanitized_payload, validate=True)
+    except Exception as exc:
+        raise ValueError("image_url.url contains invalid base64 data") from exc
+
+    return f"{header},{sanitized_payload}"
+
+
+def _normalize_images_in_messages(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    normalized_messages: list[dict[str, Any]] = []
+    image_count = 0
+
+    for message in messages:
+        normalized_message = dict(message)
+        content = message.get("content")
+
+        if isinstance(content, list):
+            normalized_content = []
+            for block in content:
+                if block.get("type") == "image_url":
+                    image_url = block.get("image_url")
+                    if not isinstance(image_url, dict):
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="image_url must be an object with a url field",
+                        )
+
+                    url = image_url.get("url")
+                    if not isinstance(url, str) or not url:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="image_url.url must be a non-empty string",
+                        )
+
+                    if url.startswith("data:"):
+                        try:
+                            url = _normalize_data_url(url)
+                        except ValueError as exc:
+                            raise HTTPException(
+                                status_code=status.HTTP_400_BAD_REQUEST,
+                                detail=str(exc),
+                            ) from exc
+
+                    normalized_content.append({**block, "image_url": {**image_url, "url": url}})
+                    image_count += 1
+                else:
+                    normalized_content.append(block)
+
+            normalized_message["content"] = normalized_content
+
+        normalized_messages.append(normalized_message)
+
+    return normalized_messages, image_count
 
 
 def _get_provider_credentials(
@@ -250,10 +322,18 @@ async def chat_completions(
     model_key, model_pricing = _get_model_pricing(db, provider, model)
     credentials = _get_provider_credentials(config, provider)
 
+    normalized_messages, image_count = _normalize_images_in_messages(request.messages)
     completion_kwargs = request.model_dump()
+    completion_kwargs["messages"] = normalized_messages
     completion_kwargs.update(credentials)
 
-    logger.info("request data %s", request)
+    logger.info(
+        "chat completion request model=%s stream=%s messages=%d images=%d",
+        request.model,
+        request.stream,
+        len(request.messages),
+        image_count,
+    )
 
     try:
         if request.stream:

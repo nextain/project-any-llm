@@ -35,6 +35,7 @@ class GenerateImageRequest(BaseModel):
     model: str | None = None
     aspect_ratio: str | None = None
     image_size: str | None = None
+    reference_images: list[str] | None = None
     stream: bool = False
 
 
@@ -53,6 +54,81 @@ class GenerateImageResponse(BaseModel):
     texts: list[str] = Field(default_factory=list)
     thoughts: list[str] = Field(default_factory=list)
     usage: ImageUsage | None = None
+
+
+def _parse_reference_image(data_url: str) -> tuple[str, bytes]:
+    if not data_url.startswith("data:"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="reference_images must be base64-encoded data URLs",
+        )
+
+    header, base64_payload = data_url.split(",", 1) if "," in data_url else ("", "")
+    if not header or ";base64" not in header:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="reference_images must be base64-encoded data URLs",
+        )
+
+    mime_type = header[5:].split(";", 1)[0]
+    if not mime_type.startswith("image/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="reference_images must be image data URLs",
+        )
+
+    payload = "".join(base64_payload.split())
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="reference_images must include base64 data",
+        )
+
+    try:
+        image_bytes = base64.b64decode(payload, validate=True)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="reference_images contains invalid base64 data",
+        ) from exc
+
+    if not image_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="reference_images contains empty data",
+        )
+
+    return mime_type, image_bytes
+
+
+def _create_inline_part(image_bytes: bytes, mime_type: str) -> object:
+    part_cls = genai.types.Part
+    if hasattr(part_cls, "from_bytes"):
+        return part_cls.from_bytes(data=image_bytes, mime_type=mime_type)
+    if hasattr(part_cls, "from_data"):
+        return part_cls.from_data(data=image_bytes, mime_type=mime_type)
+    if hasattr(part_cls, "from_inline_data"):
+        return part_cls.from_inline_data(data=image_bytes, mime_type=mime_type)
+
+    inline_data_cls = getattr(genai.types, "InlineData", None) or getattr(genai.types, "Blob", None)
+    if inline_data_cls:
+        inline_data = inline_data_cls(data=image_bytes, mime_type=mime_type)
+        return part_cls(inline_data=inline_data)
+
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Image parts are not supported by the installed google-genai package",
+    )
+
+
+def _build_contents(prompt: str, reference_images: list[str] | None) -> list[object]:
+    parts: list[object] = []
+    for data_url in reference_images or []:
+        mime_type, image_bytes = _parse_reference_image(data_url)
+        parts.append(_create_inline_part(image_bytes, mime_type))
+
+    parts.append(genai.types.Part.from_text(text=prompt))
+    return [genai.types.Content(role="user", parts=parts)]
 
 
 def _get_gemini_api_key(config: GatewayConfig) -> str:
@@ -248,7 +324,13 @@ async def generate_image(
     )
     validate_user_credit(db, _user_id)
 
-    logger.info("Generating image for user %s", request)
+    logger.info(
+        "Generating image model=%s stream=%s reference_images=%d prompt_len=%d",
+        request.model or "gemini-3-pro-image-preview",
+        request.stream,
+        len(request.reference_images or []),
+        len(request.prompt or ""),
+    )
 
     if genai is None:  # pragma: no cover
         raise HTTPException(
@@ -319,12 +401,14 @@ async def generate_image(
             cacheReadTokens=0,
         )
 
+    contents = _build_contents(request.prompt, request.reference_images)
+
     if request.stream:
         try:
             logger.info("Using generate_content_stream")
             stream = client.models.generate_content_stream(
                 model=model_id,
-                contents=[request.prompt],
+                contents=contents,
                 config=content_config,
             )
         except Exception as e:
@@ -477,7 +561,7 @@ async def generate_image(
     try:
         resp = client.models.generate_content(
             model=model_id,
-            contents=[request.prompt],
+            contents=contents,
             config=content_config,
         )
         usage_info = getattr(resp, "usage_metadata", None)

@@ -1,3 +1,4 @@
+import base64
 import json
 from time import time
 from typing import Any
@@ -5,6 +6,7 @@ from typing import Any
 from google.genai import types
 from google.genai.pagers import Pager
 
+from any_llm.logging import logger
 from any_llm.types.completion import (
     ChatCompletionChunk,
     ChoiceDelta,
@@ -77,6 +79,69 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[list[types.Conten
     formatted_messages = []
     system_instruction = None
 
+    def _create_inline_part(image_bytes: bytes, mime_type: str) -> types.Part:
+        part_cls = types.Part
+        if hasattr(part_cls, "from_bytes"):
+            return part_cls.from_bytes(data=image_bytes, mime_type=mime_type)
+        if hasattr(part_cls, "from_data"):
+            return part_cls.from_data(data=image_bytes, mime_type=mime_type)
+        if hasattr(part_cls, "from_inline_data"):
+            return part_cls.from_inline_data(data=image_bytes, mime_type=mime_type)
+
+        inline_data_cls = getattr(types, "InlineData", None) or getattr(types, "Blob", None)
+        if inline_data_cls:
+            inline_data = inline_data_cls(data=image_bytes, mime_type=mime_type)
+            return part_cls(inline_data=inline_data)
+
+        raise ValueError("Image parts are not supported by the installed google-genai package")
+
+    def _parse_data_url(data_url: str) -> tuple[str, bytes] | None:
+        if not data_url.startswith("data:"):
+            return None
+
+        header, base64_payload = data_url.split(",", 1) if "," in data_url else ("", "")
+        if not header or ";base64" not in header:
+            return None
+
+        mime_type = header[5:].split(";", 1)[0]
+        if not mime_type.startswith("image/"):
+            return None
+
+        payload = "".join(base64_payload.split())
+        if not payload:
+            return None
+
+        try:
+            image_bytes = base64.b64decode(payload, validate=True)
+        except Exception:
+            return None
+
+        if not image_bytes:
+            return None
+
+        return mime_type, image_bytes
+
+    def _build_image_part(url: str) -> types.Part | None:
+        parsed = _parse_data_url(url)
+        if parsed:
+            mime_type, image_bytes = parsed
+            return _create_inline_part(image_bytes, mime_type)
+
+        if url.startswith("http://") or url.startswith("https://"):
+            part_factory = getattr(types.Part, "from_uri", None) or getattr(types.Part, "from_url", None)
+            if part_factory:
+                try:
+                    return part_factory(uri=url)
+                except TypeError:
+                    try:
+                        return part_factory(url)
+                    except TypeError:
+                        try:
+                            return part_factory(url=url)
+                        except TypeError:
+                            return None
+        return None
+
     for message in messages:
         if message["role"] == "system":
             if system_instruction is None:
@@ -87,11 +152,24 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[list[types.Conten
             if isinstance(message["content"], str):
                 parts = [types.Part.from_text(text=message["content"])]
             else:
-                parts = [
-                    types.Part.from_text(text=content["text"])
-                    for content in message["content"]
-                    if content["type"] == "text"
-                ]
+                parts = []
+                for content in message["content"]:
+                    if content.get("type") == "text":
+                        parts.append(types.Part.from_text(text=content.get("text", "")))
+                    elif content.get("type") == "image_url":
+                        image_url = content.get("image_url", {})
+                        if isinstance(image_url, dict):
+                            url = image_url.get("url", "")
+                        else:
+                            url = ""
+                        if isinstance(url, str) and url:
+                            image_part = _build_image_part(url)
+                            if image_part:
+                                parts.append(image_part)
+                            else:
+                                logger.warning("Gemini image_url skipped; unsupported or invalid url format.")
+                if not parts:
+                    parts = [types.Part.from_text(text="")]
             formatted_messages.append(types.Content(role="user", parts=parts))
         elif message["role"] == "assistant":
             if message.get("tool_calls"):
