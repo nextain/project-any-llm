@@ -153,9 +153,6 @@ class BillingSubscription(Base):
     renew_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     transaction_id: Mapped[str | None] = mapped_column(ForeignKey("billing_credit_transactions.id"), nullable=True)
-    lemon_subscription_id: Mapped[str | None] = mapped_column(nullable=True, index=True)
-    lemon_customer_id: Mapped[str | None] = mapped_column(nullable=True, index=True)
-    lemon_checkout_id: Mapped[str | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -176,9 +173,6 @@ class BillingSubscription(Base):
             "start_at": self.start_at.isoformat() if self.start_at else None,
             "renew_at": self.renew_at.isoformat() if self.renew_at else None,
             "ends_at": self.ends_at.isoformat() if self.ends_at else None,
-            "lemon_subscription_id": self.lemon_subscription_id,
-            "lemon_customer_id": self.lemon_customer_id,
-            "lemon_checkout_id": self.lemon_checkout_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
