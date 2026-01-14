@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-import base64
-from typing import Any, Iterable
+import json
+import time
+import hashlib
+from typing import Any, AsyncGenerator
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from any_llm import AnyLLM
+from any_llm import AnyLLM, acompletion
 from any_llm.gateway.auth import verify_jwt_or_api_key_or_master
 from any_llm.gateway.auth.dependencies import get_config
 from any_llm.gateway.config import GatewayConfig
@@ -14,15 +17,8 @@ from any_llm.gateway.db import APIKey, SessionToken, get_db
 from any_llm.gateway.log_config import logger
 from any_llm.gateway.routes.chat import (
     _get_model_pricing,
-)
-from any_llm.gateway.routes.image import (
-    _add_user_spend,
-    _build_contents,
-    _coerce_usage_metadata,
-    _get_gemini_api_key,
-    _log_image_usage,
-    _set_usage_cost,
-    ImageUsage,
+    _get_provider_credentials,
+    _log_usage,
 )
 from any_llm.gateway.routes.utils import (
     charge_usage_cost,
@@ -30,218 +26,277 @@ from any_llm.gateway.routes.utils import (
     validate_user_credit,
 )
 
-from .prompt import build_prompt
-from .schema import GeneratePanelImageRequest, GeneratePanelImageResponse
-
-try:
-    from google import genai
-except ImportError:  # pragma: no cover
-    genai = None  # type: ignore[assignment]
+from .parser import extract_inline_image, extract_text, build_metadata_summary, parse_json
+from .prompt import (
+    build_prompt,
+    build_world_setting_block,
+    format_scene_elements,
+    resolve_era_label,
+    resolve_season_label,
+)
+from .schema import (
+    PanelImageResponse,
+    PanelRequest,
+    StatusUpdate,
+)
 
 router = APIRouter(prefix="/v1/webtoon", tags=["webtoon"])
 
-DEFAULT_MODEL = "gemini-3-pro-image-preview"
+IMAGE_CACHE: dict[str, tuple[PanelImageResponse, float]] = {}
+
+MODEL_INPUT = "gemini:gemini-3-pro-image-preview"
 DEFAULT_RESOLUTION = "1K"
 DEFAULT_ASPECT_RATIO = "1:1"
 
 
-def _to_data_url(mime_type: str, payload: str) -> str:
-    return f"data:{mime_type};base64,{payload}"
+def build_cache_key(body: PanelRequest, aspect_ratio: str, resolution: str, analysis_level: str) -> str:
+    hash_input = (
+        f"{body.scene}|{body.dialogue or ''}|{','.join(body.characters)}|{body.style}|{body.panelNumber}|"
+        f"{body.era or ''}|{body.season or ''}|{aspect_ratio}|{resolution}|{analysis_level}|{body.revisionNote or ''}"
+    )
+    for ref in body.references or []:
+        hash_input += f"|ref-{ref.base64}-{ref.mimeType or ''}-{ref.purpose or ''}"
+    return hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
 
 
-def _guess_or_format_data_url(value: str, mime_type: str | None = None) -> str:
-    trimmed = value.strip()
-    if trimmed.startswith("data:"):
-        return trimmed
-    return _to_data_url(mime_type or "image/png", trimmed)
-
-
-def _build_reference_urls(
-    references: Iterable[str] | None,
-    extra_images: Iterable[str] | None,
-) -> list[str]:
-    result: list[str] = []
-    if references:
-        result.extend(filter(None, references))
-    if extra_images:
-        result.extend(filter(None, extra_images))
-    return result
-
-
-def _build_reference_data_urls(scene_references: list[str] | None, character_images: list[str] | None) -> list[str]:
-    # If values already include data:, keep them; otherwise assume base64 raw and add png header.
-    result: list[str] = []
-    for item in scene_references or []:
-        result.append(item)
-    for image in character_images or []:
-        result.append(_guess_or_format_data_url(image))
-    return result
-
-
-def _resolve_resolution(value: str | None) -> str:
-    return value or DEFAULT_RESOLUTION
-
-
-def _resolve_aspect_ratio(value: str | None) -> str:
-    return value or DEFAULT_ASPECT_RATIO
-
-
-def _build_image_usage_payload(usage: Any | None, cost: float | None) -> ImageUsage | None:
-    if not usage:
+def get_cached_panel_image(key: str) -> PanelImageResponse | None:
+    entry = IMAGE_CACHE.get(key)
+    if not entry:
         return None
-    return ImageUsage(
-        inputTokens=getattr(usage, "prompt_tokens", 0) or 0,
-        outputTokens=getattr(usage, "completion_tokens", 0) or 0,
-        totalTokens=getattr(usage, "total_tokens", 0) or 0,
-        totalCost=float(cost) if cost is not None else None,
-        cacheWriteTokens=0,
-        cacheReadTokens=0,
+    payload, expires = entry
+    if expires < time.time():
+        del IMAGE_CACHE[key]
+        return None
+    return payload
+
+
+def set_cached_panel_image(key: str, payload: PanelImageResponse):
+    IMAGE_CACHE[key] = (payload, time.time() + 5 * 60)
+
+
+def finalize_response(
+    payload_text: str,
+    inline_image_base64: str,
+    mime_type: str,
+    aspect_ratio: str,
+    resolution: str,
+    panel_number: int,
+) -> PanelImageResponse:
+    return PanelImageResponse(
+        success=True,
+        imageUrl=f"data:{mime_type};base64,{inline_image_base64}",
+        imageBase64=inline_image_base64,
+        mimeType=mime_type,
+        metadata=payload_text,
+        text=payload_text,
+        aspectRatio=aspect_ratio,
+        resolution=resolution,
+        model="gemini-3-pro-image-preview",
+        panelNumber=panel_number,
     )
 
 
-def _ensure_genai_available() -> None:
-    if genai is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="google-genai dependency is not installed",
+STATUS_STEPS = [
+    StatusUpdate(stage="prepare", message="패널 정보 준비 중"),
+    StatusUpdate(stage="prompt", message="프롬프트 생성 중"),
+    StatusUpdate(stage="ai", message="AI 세션 진행 중"),
+    StatusUpdate(stage="finalize", message="이미지 정리 중"),
+]
+
+
+def make_event(event: str, payload: Any) -> str:
+    safe_data = json.dumps(payload, ensure_ascii=False)
+    return f"event: {event}\ndata: {safe_data}\n\n"
+
+
+async def create_panel_image_response(
+    payload: PanelRequest,
+    user_id: str,
+    api_key: APIKey | None,
+    db: Session,
+    config: GatewayConfig,
+    cache_key: str,
+    aspect_ratio: str,
+    resolution: str,
+    analysis: str,
+) -> PanelImageResponse:
+    era = resolve_era_label(payload.era)
+    season = resolve_season_label(payload.season)
+    scene_elements_block = format_scene_elements(payload.sceneElements or {})
+    world_setting_block = build_world_setting_block(era, season)
+    metadata_entries: list[Any] = []
+    for entry in payload.characterSheetMetadata or []:
+        if entry.metadata:
+            metadata_entries.append(entry.metadata)
+    metadata_summary = build_metadata_summary(metadata_entries)
+
+    prompt = build_prompt(
+        topic=None,
+        scene=payload.scene,
+        dialogue=payload.dialogue,
+        characters=payload.characters,
+        descriptions=payload.characterDescriptions,
+        metadata_summary=metadata_summary,
+        revision_note=payload.revisionNote,
+        scene_elements_block=scene_elements_block,
+        world_setting_block=world_setting_block,
+        aspect_ratio=aspect_ratio,
+        resolution=resolution,
+    )
+
+    provider, model = AnyLLM.split_model_provider(MODEL_INPUT)
+    model_key, model_pricing = _get_model_pricing(db, provider, model)
+    credentials = _get_provider_credentials(config, provider)
+
+    completion_kwargs = {
+        "model": MODEL_INPUT,
+        "contents": [{"text": f"{prompt}\nAnalysis level: {analysis}"}],
+        "user": user_id,
+        **credentials,
+        "stream": False,
+    }
+
+    response = await acompletion(**completion_kwargs)
+    usage_log_id = await _log_usage(
+        db=db,
+        api_key_obj=api_key,
+        model=model,
+        provider=provider,
+        endpoint="/v1/webtoon/generate-panel-image",
+        user_id=user_id,
+        response=response,
+        model_key=model_key,
+        model_pricing=model_pricing,
+    )
+    charge_usage_cost(
+        db,
+        user_id=user_id,
+        usage=getattr(response, "usage", None),
+        model_key=model_key,
+        usage_id=usage_log_id,
+    )
+    text = extract_text(response)
+    parsed = parse_json(text)
+    if not parsed:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Invalid AI response")
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="No image returned")
+    inline_data, mime = extract_inline_image(candidates[0])
+    if not inline_data or not mime:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="No image returned")
+    result = finalize_response(
+        payload_text=text,
+        inline_image_base64=inline_data,
+        mime_type=mime,
+        aspect_ratio=aspect_ratio,
+        resolution=resolution,
+        panel_number=payload.panelNumber,
+    )
+    set_cached_panel_image(cache_key, result)
+    return result
+
+
+async def panel_image_event_stream(
+    payload: PanelRequest,
+    user_id: str,
+    api_key: APIKey | None,
+    db: Session,
+    config: GatewayConfig,
+    cache_key: str,
+    aspect_ratio: str,
+    resolution: str,
+    analysis: str,
+) -> AsyncGenerator[str, None]:
+    for step in STATUS_STEPS:
+        yield make_event("status", step.dict())
+    try:
+        result = await create_panel_image_response(
+            payload,
+            user_id,
+            api_key,
+            db,
+            config,
+            cache_key,
+            aspect_ratio,
+            resolution,
+            analysis,
         )
+    except HTTPException as exc:
+        yield make_event("error", {"message": exc.detail or "Failed to generate"})
+        return
+    except Exception as exc:
+        logger.error("Panel image SSE stream failed: %s", exc)
+        yield make_event("error", {"message": str(exc)})
+        return
+    yield make_event("result", result.dict())
+    yield make_event("done", {"ok": True})
 
 
-def _build_reference_urls_from_data(
-    references: list[str] | None,
-    extra_images: list[str] | None,
-) -> list[str]:
-    transformed: list[str] = []
-    for item in references or []:
-        transformed.append(_guess_or_format_data_url(item))
-    for extra in extra_images or []:
-        transformed.append(_guess_or_format_data_url(extra))
-    return transformed
-
-
-@router.post("/panel-image", response_model=GeneratePanelImageResponse)
 async def generate_panel_image(
-    request: GeneratePanelImageRequest,
+    request: Request,
+    payload: PanelRequest,
     auth_result: tuple[APIKey | None, bool, str | None, SessionToken | None] = Depends(verify_jwt_or_api_key_or_master),
     db: Session = Depends(get_db),
     config: GatewayConfig = Depends(get_config),
-) -> GeneratePanelImageResponse:
+):
     api_key, _, _, _ = auth_result
     user_id = resolve_target_user(
         auth_result,
         explicit_user=None,
-        missing_master_detail="When using master key, 'user' detail is required",
+        missing_master_detail="When using master key, 'user' field is required",
     )
     validate_user_credit(db, user_id)
 
-    prompt_text = build_prompt(request)
-    reference_data_urls = _build_reference_urls_from_data(request.references and [ref.base64 for ref in request.references], request.characterImages)
+    accept_header = request.headers.get("accept", "")
+    wants_stream = "text/event-stream" in accept_header.lower()
 
-    model_input = request.model or DEFAULT_MODEL
-    provider, model = AnyLLM.split_model_provider(model_input)
-    model_key, _ = _get_model_pricing(db, provider, model)
-    credentials = _get_provider_credentials(config, provider)
+    aspect_ratio = payload.aspectRatio or "1:1"
+    resolution = payload.resolution or "1K"
+    analysis = payload.analysisLevel or "fast"
+    cache_key = build_cache_key(payload, aspect_ratio, resolution, analysis)
+    cached = get_cached_panel_image(cache_key)
+    if cached:
+        if wants_stream:
+            payload_data = make_event("result", cached.dict()) + make_event("done", {"ok": True})
+            return StreamingResponse(
+                iter([payload_data]),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache, no-transform",
+                    "Connection": "keep-alive",
+                },
+            )
+        return cached
 
-    _ensure_genai_available()
-    api_key_val = _get_gemini_api_key(config)
-    client = genai.Client(api_key=api_key_val)
-
-    image_config = genai.types.ImageConfig(
-        aspect_ratio=_resolve_aspect_ratio(request.aspectRatio),
-        image_size=_resolve_resolution(request.resolution),
-    )
-
-    content_config = genai.types.GenerateContentConfig(
-        response_modalities=["Text", "Image"],
-        image_config=image_config,
-        candidate_count=1,
-        thinking_config=genai.types.ThinkingConfig(include_thoughts=True),
-    )
-
-    contents = _build_contents(prompt_text, reference_data_urls)
-
-    logger.info(
-        "webtoon.panel-image request model=%s panel=%s references=%d prompt_len=%d",
-        model_input,
-        request.panelNumber,
-        len(reference_data_urls),
-        len(prompt_text),
-    )
-
-    try:
-        response = client.models.generate_content(
-            model=model_input,
-            contents=contents,
-            config=content_config,
-            **credentials,
-        )
-    except Exception as exc:
-        logger.error("panel image generation failed: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Panel image generation failed: {exc!s}",
-        ) from exc
-
-    parts = getattr(response, "parts", None) or []
-    texts: list[str] = []
-    thoughts: list[str] = []
-    image_bytes: bytes | None = None
-    mime_type = "image/png"
-
-    for part in parts:
-        text_value = getattr(part, "text", None)
-        if isinstance(text_value, str) and text_value:
-            if getattr(part, "thought", False):
-                thoughts.append(text_value)
-            else:
-                texts.append(text_value)
-
-        inline_data = getattr(part, "inline_data", None)
-        data = getattr(inline_data, "data", None) if inline_data is not None else None
-        candidate_mime = getattr(inline_data, "mime_type", None) if inline_data is not None else None
-        if not data:
-            continue
-        if isinstance(data, bytearray):
-            data = bytes(data)
-        if not isinstance(data, (bytes, bytearray)):
-            continue
-        if isinstance(candidate_mime, str) and candidate_mime.startswith("image/"):
-            mime_type = candidate_mime
-        image_bytes = data
-        break
-
-    if not image_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Panel image generation returned no image parts",
+    if wants_stream:
+        return StreamingResponse(
+            panel_image_event_stream(
+                payload,
+                user_id,
+                api_key,
+                db,
+                config,
+                cache_key,
+                aspect_ratio,
+                resolution,
+                analysis,
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+            },
         )
 
-    base64_data = base64.b64encode(image_bytes).decode("utf-8")
-    usage_info = getattr(response, "usage_metadata", None) or getattr(response, "usage", None)
-    usage_for_charge = _coerce_usage_metadata(usage_info) or usage_info
-
-    usage_log_id = _log_image_usage(
-        db=db,
-        api_key_obj=api_key,
-        model=model_input,
-        provider=provider,
-        endpoint="/v1/webtoon/panel-image",
-        user_id=user_id,
-        usage=usage_for_charge,
-    )
-
-    usage_payload: ImageUsage | None = None
-    if usage_for_charge:
-        cost = charge_usage_cost(db, user_id, usage=usage_for_charge, model_key=model_key, usage_id=usage_log_id)
-        _set_usage_cost(db, usage_log_id, cost)
-        _add_user_spend(db, user_id, cost)
-        usage_payload = _build_image_usage_payload(usage_for_charge, cost)
-
-    return GeneratePanelImageResponse(
-        mimeType=mime_type,
-        base64=base64_data,
-        prompt=prompt_text,
-        texts=texts,
-        thoughts=thoughts,
-        usage=usage_payload,
+    return await create_panel_image_response(
+        payload,
+        user_id,
+        api_key,
+        db,
+        config,
+        cache_key,
+        aspect_ratio,
+        resolution,
+        analysis,
     )

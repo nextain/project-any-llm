@@ -80,17 +80,14 @@ async def analyze_character_sheet(
     model_key, model_pricing = _get_model_pricing(db, provider, model)
     credentials = _get_provider_credentials(config, provider)
 
+    analysis_prompt = f"{PROMPT}\nImage MIME: {mime_type}\nImage Data: {payload}"
     completion_kwargs = {
         "model": model_input,
         "messages": [
             {"role": "system", "content": "You analyze character sheets with precision."},
-            {"role": "user", "content": PROMPT},
+            {"role": "user", "content": analysis_prompt},
         ],
         "user": user_id,
-        "contents": [
-            {"text": PROMPT},
-            {"inlineData": {"mimeType": mime_type or "image/png", "data": payload}},
-        ],
         **credentials,
         "stream": False,
     }

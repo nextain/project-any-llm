@@ -15,6 +15,13 @@ from any_llm.gateway.routes.webtoon.topic import router as webtoon_topic_router
 from any_llm.gateway.routes.webtoon.topic_from_elements import router as webtoon_topic_from_elements_router
 from any_llm.gateway.routes.webtoon.character_sheet import router as webtoon_character_sheet_generation_router
 from any_llm.gateway.routes.webtoon.character_sheet_analysis import router as webtoon_character_sheet_analysis_router
+from any_llm.gateway.routes.webtoon.caricature_sheet import router as webtoon_caricature_sheet_router
+from any_llm.gateway.routes.webtoon.panel_review import router as webtoon_panel_review_router
+from any_llm.gateway.routes.webtoon.panel_script import router as webtoon_panel_script_router
+from any_llm.gateway.routes.webtoon.review_webtoon import router as webtoon_review_webtoon_router
+from any_llm.gateway.routes.webtoon.sns_copy import router as webtoon_sns_copy_router
+from any_llm.gateway.routes.webtoon.publish_copy import router as webtoon_publish_copy_router
+from any_llm.gateway.routes.webtoon.panel_image import router as webtoon_panel_image_router
 
 
 def create_app(config: GatewayConfig) -> FastAPI:
@@ -65,8 +72,16 @@ def create_app(config: GatewayConfig) -> FastAPI:
     app.include_router(webtoon_script_router)
     app.include_router(webtoon_panel_dialogue_router)
     app.include_router(webtoon_refine_dialogue_router)
+    app.include_router(webtoon_panel_scene_router)
+    app.include_router(webtoon_panel_review_router)
+    app.include_router(webtoon_panel_script_router)
+    app.include_router(webtoon_review_webtoon_router)
+    app.include_router(webtoon_sns_copy_router)
+    app.include_router(webtoon_publish_copy_router)
+    app.include_router(webtoon_panel_image_router)
     app.include_router(webtoon_character_sheet_generation_router)
     app.include_router(webtoon_character_sheet_analysis_router)
+    app.include_router(webtoon_caricature_sheet_router)
 
     @app.get("/", include_in_schema=False)
     async def redirect_to_docs() -> RedirectResponse:

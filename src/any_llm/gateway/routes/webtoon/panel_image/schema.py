@@ -1,84 +1,80 @@
 from __future__ import annotations
 
-from typing import List, Literal, Optional
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from any_llm.gateway.routes.image import ImageUsage
 
-ResolutionOption = Literal["1K", "2K", "4K"]
-AspectRatioOption = Literal[
-    "1:1",
-    "2:3",
-    "3:2",
-    "3:4",
-    "4:3",
-    "4:5",
-    "5:4",
-    "9:16",
-    "16:9",
-    "21:9",
-]
-
-class SceneElements(BaseModel):
-    subject: Optional[str] = None
-    action: Optional[str] = None
-    setting: Optional[str] = None
-    composition: Optional[str] = None
-    lighting: Optional[str] = None
-    style: Optional[str] = None
-
-class PreviousPanel(BaseModel):
-    panel: int
-    scene: str
-    dialogue: Optional[str] = None
-    metadata: Optional[str] = None
-
-class SceneReference(BaseModel):
+class ReferenceEntry(BaseModel):
     base64: str
-    mimeType: Optional[str] = None
-    purpose: Optional[Literal["background", "character", "style"]]
+    mimeType: str | None = None
+    purpose: Literal["background", "character", "style"] | None = None
+
 
 class CharacterSheetMetadataEntry(BaseModel):
     name: str
-    summary: Optional[str] = None
-    outfit: Optional[List[str]] = None
-    colors: Optional[List[str]] = None
-    accessories: Optional[List[str]] = None
-    hair: Optional[str] = None
-    face: Optional[str] = None
-    body: Optional[str] = None
-    props: Optional[List[str]] = None
-    shoes: Optional[List[str]] = None
-    notes: Optional[List[str]] = None
+    metadata: str | dict[str, str] | None = None
 
-class GeneratePanelImageRequest(BaseModel):
+
+class PanelMetadataEntryCharacter(BaseModel):
+    name: str
+    outfit: str | None = None
+    accessories: list[str] = []
+    hair: str | None = None
+    props: list[str] = []
+    pose: str | None = None
+    notes: str | None = None
+
+
+class PanelMetadataEntry(BaseModel):
+    summary: str | None = None
+    characters: list[PanelMetadataEntryCharacter] | None = None
+    background: str | None = None
+    lighting: str | None = None
+    changes: list[str] = []
+    notes: list[str] = []
+
+
+class CharacterCaricatureStrength(BaseModel):
+    text: str
+
+
+class PanelRequest(BaseModel):
     scene: str
-    dialogue: Optional[str] = None
-    characters: List[str]
+    dialogue: str | None = None
+    characters: list[str]
     style: str
     panelNumber: int
-    era: Optional[str] = None
-    season: Optional[str] = None
-    characterDescriptions: Optional[List[str]] = None
-    characterImages: Optional[List[str]] = None
-    styleDoc: Optional[str] = None
-    sceneElements: Optional[SceneElements] = None
-    previousPanels: Optional[List[PreviousPanel]] = None
-    characterSheetMetadata: Optional[List[CharacterSheetMetadataEntry]] = None
-    characterGenerationMode: Optional[Literal["ai", "caricature"]]
-    characterCaricatureStrengths: Optional[List[str]] = None
-    resolution: Optional[ResolutionOption] = None
-    aspectRatio: Optional[AspectRatioOption] = None
-    revisionNote: Optional[str] = None
-    references: Optional[List[SceneReference]] = None
-    analysisLevel: Optional[Literal["fast", "full"]] = None
-    model: Optional[str] = None
+    era: str | None = None
+    season: str | None = None
+    characterDescriptions: list[str] | None = None
+    characterImages: list[str] | None = None
+    styleDoc: str | None = None
+    sceneElements: dict[str, str] | None = None
+    previousPanels: list[dict[str, str]] | None = None
+    characterSheetMetadata: list[CharacterSheetMetadataEntry] | None = None
+    characterGenerationMode: Literal["ai", "caricature"] | None = None
+    characterCaricatureStrengths: list[str] | None = None
+    resolution: Literal["1K", "2K", "4K"] | None = None
+    aspectRatio: Literal["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"] | None = None
+    revisionNote: str | None = None
+    references: list[ReferenceEntry] | None = None
+    analysisLevel: Literal["fast", "full"] | None = None
 
-class GeneratePanelImageResponse(BaseModel):
+
+class PanelImageResponse(BaseModel):
+    success: Literal[True]
+    imageUrl: str
+    imageBase64: str
     mimeType: str
-    base64: str
-    prompt: str
-    texts: List[str] = Field(default_factory=list)
-    thoughts: List[str] = Field(default_factory=list)
-    usage: Optional[ImageUsage] = None
+    metadata: str
+    text: str
+    aspectRatio: Literal["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]
+    resolution: Literal["1K", "2K", "4K"]
+    model: str
+    panelNumber: int
+
+
+class StatusUpdate(BaseModel):
+    stage: str
+    message: str
