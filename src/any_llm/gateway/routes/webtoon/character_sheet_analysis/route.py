@@ -18,7 +18,7 @@ from any_llm.gateway.db import APIKey, SessionToken, get_db
 from any_llm.gateway.log_config import logger
 from any_llm.gateway.routes.chat import (
     _get_model_pricing,
-    _get_provider_credentials,
+    _get_provider_kwargs,
     _log_usage,
 )
 from any_llm.gateway.routes.utils import (
@@ -78,7 +78,7 @@ async def analyze_character_sheet(
     model_input = DEFAULT_MODEL
     provider, model = AnyLLM.split_model_provider(model_input)
     model_key, model_pricing = _get_model_pricing(db, provider, model)
-    credentials = _get_provider_credentials(config, provider)
+    credentials = _get_provider_kwargs(config, provider)
 
     analysis_prompt = f"{PROMPT}\nImage MIME: {mime_type}\nImage Data: {payload}"
     completion_kwargs = {

@@ -63,6 +63,10 @@ class GatewayConfig(BaseSettings):
         default=None,
         description="Directory to store dumped chat images when image_dump_enabled is true",
     )
+    test_model_override: str | None = Field(
+        default=None,
+        description="Optional test override for provider:model (e.g., 'zai:glm-4.7')",
+    )
 
 
 def load_config(config_path: str | None = None) -> GatewayConfig:

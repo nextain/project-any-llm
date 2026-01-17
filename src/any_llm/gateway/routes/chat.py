@@ -383,19 +383,23 @@ async def chat_completions(
     # for caret
     validate_user_credit(db, user_id)
 
-    provider, model = AnyLLM.split_model_provider(request.model)
+    model_input = config.test_model_override or request.model
+    if config.test_model_override:
+        logger.info("Overriding chat model with %s for testing", config.test_model_override)
+    provider, model = AnyLLM.split_model_provider(model_input)
     model_key, model_pricing = _get_model_pricing(db, provider, model)
     provider_kwargs = _get_provider_kwargs(config, provider)
 
     dump_request_id = f"chat_{uuid.uuid4().hex}"
     normalized_messages, image_count = _normalize_images_in_messages(request.messages, dump_request_id, config)
     completion_kwargs = request.model_dump()
+    completion_kwargs["model"] = model_input
     completion_kwargs["messages"] = normalized_messages
     completion_kwargs.update(provider_kwargs)
 
     logger.info(
         "chat completion request model=%s stream=%s messages=%d images=%d",
-        request.model,
+        model_input,
         request.stream,
         len(request.messages),
         image_count,

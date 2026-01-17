@@ -16,6 +16,7 @@ from any_llm.gateway.routes.webtoon.topic_from_elements import router as webtoon
 from any_llm.gateway.routes.webtoon.character_sheet import router as webtoon_character_sheet_generation_router
 from any_llm.gateway.routes.webtoon.character_sheet_analysis import router as webtoon_character_sheet_analysis_router
 from any_llm.gateway.routes.webtoon.caricature_sheet import router as webtoon_caricature_sheet_router
+from any_llm.gateway.routes.webtoon.panel_scene import router as webtoon_panel_scene_router
 from any_llm.gateway.routes.webtoon.panel_review import router as webtoon_panel_review_router
 from any_llm.gateway.routes.webtoon.panel_script import router as webtoon_panel_script_router
 from any_llm.gateway.routes.webtoon.review_webtoon import router as webtoon_review_webtoon_router

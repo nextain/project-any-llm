@@ -38,4 +38,5 @@ class ZaiProvider(BaseOpenAIProvider):
         # Copy of the logic from the base implementation because you can't use super() in a static method
         converted_params = params.model_dump(exclude_none=True, exclude={"model_id", "messages"})
         converted_params.update(kwargs)
+        
         return converted_params
