@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import re
 from typing import Annotated, Any
+
+from PIL import Image
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import ValidationError
@@ -175,6 +178,19 @@ def _build_data_url(mime_type: str, payload: str) -> str:
     return f"data:{mime_type};base64,{payload}"
 
 
+def _convert_to_webp(image_bytes: bytes) -> tuple[bytes, str]:
+    """Convert image to WebP lossless format for webtoon quality."""
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img = img.convert("RGBA")
+            output = io.BytesIO()
+            img.save(output, format="WEBP", lossless=True)
+            return output.getvalue(), "image/webp"
+    except Exception as exc:
+        logger.warning("Failed to convert character sheet to WebP: %s", exc)
+        return image_bytes, "image/png"
+
+
 @router.post("/character-sheet", response_model=GenerateCharacterSheetResponse)
 async def generate_character_sheet(
     http_request: Request,
@@ -299,8 +315,9 @@ async def generate_character_sheet(
             metadata_text = _build_metadata_text(client, image_bytes, mime_type)
             parsed_metadata = _extract_json_from_text(metadata_text)
             metadata_text = json.dumps(parsed_metadata) if isinstance(parsed_metadata, dict) else (metadata_text or "")
-            base64_payload = base64.b64encode(image_bytes).decode("utf-8")
-            image_url = _build_data_url(mime_type, base64_payload)
+            webp_bytes, webp_mime = _convert_to_webp(image_bytes)
+            base64_payload = base64.b64encode(webp_bytes).decode("utf-8")
+            image_url = _build_data_url(webp_mime, base64_payload)
         else:
             logger.error("character sheet returned no image parts for %s", character.name)
 

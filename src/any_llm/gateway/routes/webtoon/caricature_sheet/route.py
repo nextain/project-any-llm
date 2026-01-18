@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import re
 from typing import Annotated, Any, TYPE_CHECKING
+
+from PIL import Image
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import ValidationError
@@ -161,6 +164,19 @@ def _build_data_url(mime_type: str, payload: str) -> str:
     return f"data:{mime_type};base64,{payload}"
 
 
+def _convert_to_webp(image_bytes: bytes) -> tuple[bytes, str]:
+    """Convert image to WebP lossless format for webtoon quality."""
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img = img.convert("RGBA")
+            output = io.BytesIO()
+            img.save(output, format="WEBP", lossless=True)
+            return output.getvalue(), "image/webp"
+    except Exception as exc:
+        logger.warning("Failed to convert caricature to WebP: %s", exc)
+        return image_bytes, "image/png"
+
+
 @router.post("/caricature-sheet", response_model=GenerateCaricatureSheetResponse)
 async def generate_caricature_sheet(
     http_request: Request,
@@ -278,8 +294,9 @@ async def generate_caricature_sheet(
             parsed_metadata = json.loads(sanitized)
         except json.JSONDecodeError:
             logger.warning("caricature metadata is not valid json: %s", sanitized)
-    base64_payload = base64.b64encode(image_bytes).decode("utf-8")
-    image_url = _build_data_url(result_mime, base64_payload)
+    webp_bytes, webp_mime = _convert_to_webp(image_bytes)
+    base64_payload = base64.b64encode(webp_bytes).decode("utf-8")
+    image_url = _build_data_url(webp_mime, base64_payload)
 
     return GenerateCaricatureSheetResponse(
         sheet=CaricatureSheetEntry(imageUrl=image_url, metadata=json.dumps(parsed_metadata)),
