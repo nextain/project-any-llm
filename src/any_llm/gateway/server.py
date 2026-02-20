@@ -1,13 +1,19 @@
+import asyncio
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from any_llm.gateway import __version__
 from any_llm.gateway.auth.dependencies import set_config
+from any_llm.gateway.billing.renewal import renew_subscriptions
 from any_llm.gateway.config import GatewayConfig
 from any_llm.gateway.db import get_db, init_db
+from any_llm.gateway.log_config import logger
 from any_llm.gateway.pricing_init import initialize_pricing_from_config
 from any_llm.gateway.routes import auth, budgets, chat, health, image, keys, pricing, profile, users
+from any_llm.gateway.routes.billing import router as billing_router
 from any_llm.gateway.routes.webtoon.panel_dialogue import router as webtoon_panel_dialogue_router
 from any_llm.gateway.routes.webtoon.refine_dialogue import router as webtoon_refine_dialogue_router
 from any_llm.gateway.routes.webtoon.script import router as webtoon_script_router
@@ -70,6 +76,25 @@ def _seed_billing_plans(db: "Session") -> None:
     db.commit()
 
 
+RENEWAL_INTERVAL_SECONDS = 3600  # 1 hour
+
+
+async def _renewal_loop() -> None:
+    """Background task: sweep subscription renewals every hour."""
+    while True:
+        try:
+            db = next(get_db())
+            try:
+                count = renew_subscriptions(db)
+                if count > 0:
+                    logger.info("Background renewal: %d subscriptions renewed", count)
+            finally:
+                db.close()
+        except Exception:
+            logger.exception("Background renewal sweep failed")
+        await asyncio.sleep(RENEWAL_INTERVAL_SECONDS)
+
+
 def create_app(config: GatewayConfig) -> FastAPI:
     """Create and configure FastAPI application.
 
@@ -90,11 +115,18 @@ def create_app(config: GatewayConfig) -> FastAPI:
     finally:
         db.close()
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):  # noqa: ANN001
+        task = asyncio.create_task(_renewal_loop())
+        yield
+        task.cancel()
+
     app = FastAPI(
         title="any-llm-gateway",
         description="A clean FastAPI gateway for any-llm with API key management",
         version=__version__,
         swagger_ui_parameters={"persistAuthorization": True},
+        lifespan=lifespan,
     )
 
     app.add_middleware(
@@ -114,6 +146,7 @@ def create_app(config: GatewayConfig) -> FastAPI:
     app.include_router(profile.router)
     app.include_router(health.router)
     app.include_router(image.router)
+    app.include_router(billing_router)
     app.include_router(webtoon_topic_router)
     app.include_router(webtoon_topic_from_elements_router)
     app.include_router(webtoon_script_router)

@@ -53,6 +53,7 @@ class SocialLoginRequest(BaseModel):
     user_agent: str | None = Field(default=None, description="브라우저/클라이언트 UA")
     ip: str | None = Field(default=None, description="클라이언트 IP(서버에서 주입 가능)")
     provider_token: str | None = Field(default=None, description="소셜 프로바이더 토큰")
+    provider_account_id: str | None = Field(default=None, description="소셜 프로바이더 계정 고유 ID (Discord user ID, Google sub 등)")
     metadata: dict[str, Any] = Field(default_factory=dict, description="추가 메타데이터")
 
 
@@ -144,6 +145,7 @@ def _normalize_profile(request: SocialLoginRequest) -> dict[str, Any]:
         "name": request.name,
         "avatar_url": request.avatar_url,
         "provider_token": request.provider_token,
+        "provider_account_id": request.provider_account_id,
         "metadata": request.metadata or {},
         "device": {
             "device_type": request.device_type or "web",
@@ -387,6 +389,7 @@ async def social_login(
         caret_user = CaretUser(
             user_id=user.user_id,
             provider=profile["provider"],
+            provider_account_id=profile.get("provider_account_id"),
             email=profile.get("email"),
             role="user",
             name=profile.get("name"),
@@ -401,6 +404,9 @@ async def social_login(
         user = db.query(User).filter(User.user_id == caret_user.user_id).first()
         if not user:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Linked user missing")
+        # Backfill provider_account_id for existing users
+        if not caret_user.provider_account_id and profile.get("provider_account_id"):
+            caret_user.provider_account_id = profile["provider_account_id"]
 
     access_token, refresh_token, access_exp, refresh_exp = _issue_tokens(
         config,
@@ -584,3 +590,55 @@ async def me(
               "organizations": [],
             }
         )
+
+
+class LookupResponse(BaseModel):
+    """유저 조회 응답."""
+
+    user_id: str
+    alias: str | None = None
+    provider: str
+    provider_account_id: str | None = None
+    email: str | None = None
+    name: str | None = None
+    avatar_url: str | None = None
+
+
+@router.get("/lookup")
+async def lookup_user(
+    provider: Annotated[str, Query(description="소셜 프로바이더 (discord, google 등)")],
+    provider_account_id: Annotated[str | None, Query(description="프로바이더 계정 ID")] = None,
+    email: Annotated[str | None, Query(description="이메일 (Google Chat 등에서 사용)")] = None,
+    auth_result: Annotated[
+        tuple[APIKey | None, bool, str | None, SessionToken | None],
+        Depends(verify_jwt_or_api_key_or_master),
+    ] = None,
+    db: Annotated[Session, Depends(get_db)] = None,
+) -> LookupResponse:
+    """프로바이더 계정 ID 또는 이메일로 CaretUser를 조회. 봇/웹훅 서비스용."""
+    _, is_master, _, _ = auth_result
+    if not is_master:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Master key required")
+
+    if not provider_account_id and not email:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="provider_account_id or email required")
+
+    query = db.query(CaretUser).filter(CaretUser.provider == provider)
+    if provider_account_id:
+        query = query.filter(CaretUser.provider_account_id == provider_account_id)
+    elif email:
+        query = query.filter(CaretUser.email == email)
+
+    caret_user = query.first()
+    if not caret_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    return LookupResponse(
+        user_id=caret_user.user_id,
+        alias=caret_user.name,
+        provider=caret_user.provider,
+        provider_account_id=caret_user.provider_account_id,
+        email=caret_user.email,
+        name=caret_user.name,
+        avatar_url=caret_user.avatar_url,
+    )
