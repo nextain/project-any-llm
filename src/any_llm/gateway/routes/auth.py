@@ -158,6 +158,73 @@ def _normalize_profile(request: SocialLoginRequest) -> dict[str, Any]:
     }
 
 
+def _linked_account_id(caret_user: CaretUser, provider: str) -> str | None:
+    """Read linked provider account id from metadata."""
+    metadata = caret_user.metadata_ if isinstance(caret_user.metadata_, dict) else {}
+    linked = metadata.get("linked_accounts")
+    if not isinstance(linked, dict):
+        return None
+    value = linked.get(provider)
+    return value if isinstance(value, str) and value else None
+
+
+def _upsert_linked_account(caret_user: CaretUser, provider: str, provider_account_id: str | None) -> None:
+    """Store provider account mapping in metadata without changing legacy columns."""
+    if not provider_account_id:
+        return
+
+    metadata = dict(caret_user.metadata_ or {})
+    linked = metadata.get("linked_accounts")
+    if not isinstance(linked, dict):
+        linked = {}
+    linked[provider] = provider_account_id
+    metadata["linked_accounts"] = linked
+    caret_user.metadata_ = metadata
+
+
+def _find_existing_caret_user(db: Session, profile: dict[str, Any]) -> CaretUser | None:
+    """Find an existing CaretUser for social login with backward compatibility.
+
+    Order:
+    1) provider + provider_account_id exact match
+    2) provider + email match (legacy behavior)
+    3) same email regardless of provider (account linking)
+    """
+    provider = profile["provider"]
+    provider_account_id = profile.get("provider_account_id")
+    email = profile.get("email")
+
+    if provider_account_id:
+        by_provider_id = (
+            db.query(CaretUser)
+            .filter(
+                CaretUser.provider == provider,
+                CaretUser.provider_account_id == provider_account_id,
+            )
+            .first()
+        )
+        if by_provider_id:
+            return by_provider_id
+
+    if email:
+        by_provider_email = (
+            db.query(CaretUser)
+            .filter(
+                CaretUser.provider == provider,
+                CaretUser.email == email,
+            )
+            .first()
+        )
+        if by_provider_email:
+            return by_provider_email
+
+        by_email = db.query(CaretUser).filter(CaretUser.email == email).first()
+        if by_email:
+            return by_email
+
+    return None
+
+
 def _get_or_create_api_key(db: Session, user_id: str, allow_create: bool) -> tuple[APIKey, str | None]:
     """사용자용 API 키를 가져오거나 생성."""
     api_key = (
@@ -359,14 +426,7 @@ async def social_login(
     profile = _normalize_profile(request)
     logger.info(f"Social login: {profile}")
 
-    caret_user = (
-        db.query(CaretUser)
-        .filter(
-            CaretUser.provider == profile["provider"],
-            CaretUser.email == profile["email"],
-        )
-        .first()
-    )
+    caret_user = _find_existing_caret_user(db, profile)
 
     is_new_user = caret_user is None
     user: User | None
@@ -397,6 +457,7 @@ async def social_login(
             metadata_=profile.get("metadata") or {},
             last_login_at=datetime.now(UTC),
         )
+        _upsert_linked_account(caret_user, profile["provider"], profile.get("provider_account_id"))
         db.add(caret_user)
 
         _ensure_free_plan_and_balance(db, user.user_id, now)
@@ -405,8 +466,16 @@ async def social_login(
         if not user:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Linked user missing")
         # Backfill provider_account_id for existing users
-        if not caret_user.provider_account_id and profile.get("provider_account_id"):
+        if caret_user.provider == profile["provider"] and not caret_user.provider_account_id and profile.get("provider_account_id"):
             caret_user.provider_account_id = profile["provider_account_id"]
+        _upsert_linked_account(caret_user, profile["provider"], profile.get("provider_account_id"))
+        if not caret_user.email and profile.get("email"):
+            caret_user.email = profile["email"]
+        if not caret_user.name and profile.get("name"):
+            caret_user.name = profile["name"]
+        if not caret_user.avatar_url and profile.get("avatar_url"):
+            caret_user.avatar_url = profile["avatar_url"]
+        caret_user.last_login_at = datetime.now(UTC)
 
     access_token, refresh_token, access_exp, refresh_exp = _issue_tokens(
         config,
@@ -623,13 +692,35 @@ async def lookup_user(
     if not provider_account_id and not email:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="provider_account_id or email required")
 
-    query = db.query(CaretUser).filter(CaretUser.provider == provider)
+    caret_user: CaretUser | None = None
     if provider_account_id:
-        query = query.filter(CaretUser.provider_account_id == provider_account_id)
+        caret_user = (
+            db.query(CaretUser)
+            .filter(
+                CaretUser.provider == provider,
+                CaretUser.provider_account_id == provider_account_id,
+            )
+            .first()
+        )
+        if not caret_user:
+            # Fallback for linked accounts stored in metadata.
+            for row in db.query(CaretUser).all():
+                if _linked_account_id(row, provider) == provider_account_id:
+                    caret_user = row
+                    break
     elif email:
-        query = query.filter(CaretUser.email == email)
+        caret_user = (
+            db.query(CaretUser)
+            .filter(
+                CaretUser.provider == provider,
+                CaretUser.email == email,
+            )
+            .first()
+        )
+        if not caret_user:
+            # Backward-compatible fallback: if provider differs but email is same, still resolve.
+            caret_user = db.query(CaretUser).filter(CaretUser.email == email).first()
 
-    caret_user = query.first()
     if not caret_user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
