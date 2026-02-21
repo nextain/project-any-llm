@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from any_llm.gateway.auth import generate_api_key, hash_key, verify_jwt_or_api_key_or_master
 from any_llm.gateway.auth.dependencies import get_config
@@ -180,6 +181,7 @@ def _upsert_linked_account(caret_user: CaretUser, provider: str, provider_accoun
     linked[provider] = provider_account_id
     metadata["linked_accounts"] = linked
     caret_user.metadata_ = metadata
+    flag_modified(caret_user, "metadata_")
 
 
 def _find_existing_caret_user(db: Session, profile: dict[str, Any]) -> CaretUser | None:
@@ -702,6 +704,14 @@ async def lookup_user(
             )
             .first()
         )
+        if not caret_user:
+            # Backward-compatible fallback for rows where provider changed
+            # but provider_account_id was reused for another provider login.
+            caret_user = (
+                db.query(CaretUser)
+                .filter(CaretUser.provider_account_id == provider_account_id)
+                .first()
+            )
         if not caret_user:
             # Fallback for linked accounts stored in metadata.
             for row in db.query(CaretUser).all():
