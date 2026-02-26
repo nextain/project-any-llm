@@ -40,8 +40,8 @@ def _seed_billing_plans(db: "Session") -> None:
     plans = [
         {
             "name": "FREE",
-            "monthly_credits": 10.0,
-            "monthly_bonus_credits": 20.0,
+            "monthly_credits": 3.0,
+            "monthly_bonus_credits": 5.0,
             "add_amount_usd": 0.0,
             "add_bonus_percent": 0.0,
             "price_usd": 0.0,

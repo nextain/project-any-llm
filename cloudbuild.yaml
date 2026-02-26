@@ -1,0 +1,18 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'asia-northeast3-docker.pkg.dev/$PROJECT_ID/naia/gateway:$_TAG'
+      - '-f'
+      - 'docker/Dockerfile.cloudrun'
+      - '.'
+
+images:
+  - 'asia-northeast3-docker.pkg.dev/$PROJECT_ID/naia/gateway:$_TAG'
+
+substitutions:
+  _TAG: 'v1'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
