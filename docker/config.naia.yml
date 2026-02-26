@@ -17,7 +17,7 @@ auth_base_url: "${AUTH_BASE_URL:-https://naia.nextain.io}"
 providers:
   vertexai:
     project: "project-a8b18af5-b980-43e7-8ec"
-    location: "asia-northeast3"
+    location: "us-central1"
   xai:
     api_key: "${XAI_API_KEY}"
   anthropic:
