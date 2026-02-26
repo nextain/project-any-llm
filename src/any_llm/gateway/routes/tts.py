@@ -1,10 +1,14 @@
-"""TTS endpoint — proxies Google Cloud Text-to-Speech via Nextain credits."""
+"""TTS endpoint — proxies Google Cloud Text-to-Speech via Nextain credits.
+
+Supports two auth modes:
+1. Service account (Cloud Run default) — no API key needed
+2. API key fallback — uses GOOGLE_TTS_API_KEY or GEMINI_API_KEY
+"""
 
 import base64
 import uuid
 from datetime import UTC, datetime
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -31,7 +35,25 @@ _PRICING = {
     "neural2": 16.0,
 }
 
-GCP_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
+_AUDIO_ENCODING_MAP = {
+    "MP3": "MP3",
+    "OGG_OPUS": "OGG_OPUS",
+    "LINEAR16": "LINEAR16",
+    "MULAW": "MULAW",
+    "ALAW": "ALAW",
+}
+
+# Lazy-loaded TTS client (service account auth on Cloud Run)
+_tts_client = None
+
+
+def _get_tts_client():
+    """Get or create Google Cloud TTS client (uses ADC / service account)."""
+    global _tts_client
+    if _tts_client is None:
+        from google.cloud import texttospeech
+        _tts_client = texttospeech.TextToSpeechClient()
+    return _tts_client
 
 
 class SpeechRequest(BaseModel):
@@ -65,25 +87,6 @@ def _voice_tier(voice: str) -> str:
     if "wavenet" in lower:
         return "wavenet"
     return "standard"
-
-
-def _is_valid_key(key: str | None) -> bool:
-    """Check if key is a real API key (not empty or unresolved env var)."""
-    if not key or not key.strip():
-        return False
-    return not key.startswith("${")
-
-
-def _resolve_tts_api_key(config: GatewayConfig) -> str | None:
-    """Resolve GCP TTS API key from config, falling back to Gemini key."""
-    providers = config.providers or {}
-    google_tts = providers.get("google_tts") or {}
-    key = google_tts.get("api_key") if isinstance(google_tts, dict) else getattr(google_tts, "api_key", None)
-    if _is_valid_key(key):
-        return key
-    gemini = providers.get("gemini") or {}
-    fallback = gemini.get("api_key") if isinstance(gemini, dict) else getattr(gemini, "api_key", None)
-    return fallback if _is_valid_key(fallback) else None
 
 
 def _log_tts_usage(
@@ -121,7 +124,6 @@ def _log_tts_usage(
 
 
 async def _call_gcp_tts(
-    gcp_key: str,
     text: str,
     voice: str,
     language_code: str,
@@ -132,34 +134,43 @@ async def _call_gcp_tts(
     api_key_obj: APIKey | None,
     user_id: str | None,
 ) -> tuple[str, float, str | None]:
-    """Call Google Cloud TTS and handle billing. Returns (audio_b64, cost_usd, usage_id)."""
-    payload = {
-        "input": {"text": text},
-        "voice": {"languageCode": language_code, "name": voice},
-        "audioConfig": {
-            "audioEncoding": audio_encoding,
-            "speakingRate": speaking_rate,
-            "pitch": pitch,
-        },
-    }
+    """Call Google Cloud TTS via service account and handle billing. Returns (audio_b64, cost_usd, usage_id)."""
+    import asyncio
+    from google.cloud import texttospeech
+
+    synthesis_input = texttospeech.SynthesisInput(text=text)
+    voice_params = texttospeech.VoiceSelectionParams(
+        language_code=language_code,
+        name=voice,
+    )
+    gcp_encoding = getattr(
+        texttospeech.AudioEncoding,
+        _AUDIO_ENCODING_MAP.get(audio_encoding, "MP3"),
+        texttospeech.AudioEncoding.MP3,
+    )
+    audio_config = texttospeech.AudioConfig(
+        audio_encoding=gcp_encoding,
+        speaking_rate=speaking_rate,
+        pitch=pitch,
+    )
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(f"{GCP_TTS_URL}?key={gcp_key}", json=payload)
-    except httpx.TimeoutException:
-        _log_tts_usage(db, api_key_obj, user_id, len(text), voice, error="timeout")
-        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="TTS timeout")
-
-    if resp.status_code != 200:
-        error_text = resp.text[:300]
-        _log_tts_usage(db, api_key_obj, user_id, len(text), voice, error=error_text)
+        client = _get_tts_client()
+        response = await asyncio.to_thread(
+            client.synthesize_speech,
+            input=synthesis_input,
+            voice=voice_params,
+            audio_config=audio_config,
+        )
+    except Exception as exc:
+        error_msg = str(exc)[:300]
+        _log_tts_usage(db, api_key_obj, user_id, len(text), voice, error=error_msg)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Google TTS error {resp.status_code}: {error_text}",
+            detail=f"Google TTS error: {error_msg}",
         )
 
-    data = resp.json()
-    audio_b64 = data.get("audioContent", "")
+    audio_b64 = base64.b64encode(response.audio_content).decode("utf-8")
 
     char_count = len(text)
     tier = _voice_tier(voice)
@@ -217,13 +228,6 @@ async def synthesize_speech(
     user_id = resolve_target_user(auth_result, None)
     validate_user_credit(db, user_id)
 
-    gcp_key = _resolve_tts_api_key(config)
-    if not gcp_key:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Google TTS API key not configured on server",
-        )
-
     body = await request.json()
     is_openai_format = "model" in body
 
@@ -234,7 +238,7 @@ async def synthesize_speech(
         audio_encoding = _FORMAT_MAP.get(req.response_format, "MP3")
 
         audio_b64, _, _ = await _call_gcp_tts(
-            gcp_key, req.input, gcp_voice, language_code,
+            req.input, gcp_voice, language_code,
             audio_encoding, req.speed, 0.0,
             db, api_key_obj, user_id,
         )
@@ -246,7 +250,7 @@ async def synthesize_speech(
     req = SpeechRequest(**body)
     language_code = req.language_code or _derive_language_code(req.voice)
     audio_b64, cost_usd, _ = await _call_gcp_tts(
-        gcp_key, req.input, req.voice, language_code,
+        req.input, req.voice, language_code,
         req.audio_encoding, req.speaking_rate, req.pitch,
         db, api_key_obj, user_id,
     )
@@ -304,19 +308,12 @@ async def openai_compatible_speech(
     user_id = resolve_target_user(auth_result, None)
     validate_user_credit(db, user_id)
 
-    gcp_key = _resolve_tts_api_key(config)
-    if not gcp_key:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Google TTS API key not configured on server",
-        )
-
     gcp_voice = req.voice if "-" in req.voice else "ko-KR-Neural2-A"
     language_code = _derive_language_code(gcp_voice)
     audio_encoding = _FORMAT_MAP.get(req.response_format, "MP3")
 
     audio_b64, _, _ = await _call_gcp_tts(
-        gcp_key, req.input, gcp_voice, language_code,
+        req.input, gcp_voice, language_code,
         audio_encoding, req.speed, 0.0,
         db, api_key_obj, user_id,
     )
